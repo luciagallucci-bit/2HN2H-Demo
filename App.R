@@ -4,8 +4,9 @@
 
 # Brief Description: 
 
-# install.packages(c("shiny","ggplot2","dplyr","tidyr","purrr","DT","stringr"))
-# library(shiny); runApp("path/to/this/file")
+
+# install.packages(c("bslib","shinyWidgets"))
+# install.packages("shinycssloaders")
 
 # Libraries
 library(shiny)
@@ -15,8 +16,16 @@ library(tidyr)
 library(purrr)
 library(DT)
 library(stringr)
+library(bslib)
+library(shinyWidgets)
 
-# ---------- Utility functions -----------
+# Main colors ------------------------------------------------------------------
+
+hits_color <- "#2E86C1"
+log_color  <- "#1F4E79"
+accent     <- "#5DADE2"
+
+# Utility functions ------------------------------------------------------------
 
 softmax_from_logits <- function(logits) {
   ex <- exp(logits - max(logits))
@@ -219,51 +228,234 @@ ALL_DATASETS <- generate_all_datasets(seed = 12345)
 # ---------- Shiny UI ------------
 
 ui <- fluidPage(
-  titlePanel("2HN2H-style demo — simulated datasets with 15 folds"),
+  
+  theme = bs_theme(
+    version = 5,
+    bootswatch = "flatly",
+    primary = "#1F4E79",
+    secondary = "#2E86C1",
+    base_font = font_google("Inter"),
+    heading_font = font_google("Inter")
+  ),
+  
+  tags$head(
+    tags$style(HTML("
+    
+    body {
+      background-color: #F7F9FC;
+    }
+
+    .title-panel {
+      background: linear-gradient(90deg,#1F4E79,#2E86C1);
+      color: white;
+      padding: 20px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .card {
+      border-radius: 10px;
+      box-shadow: 0px 2px 10px rgba(0,0,0,0.05);
+    }
+
+    .control-label {
+      font-weight: 600;
+    }
+
+    .plot-title {
+      font-size:18px;
+      font-weight:600;
+    }
+
+    "))
+  ),
+  
+  div(class="title-panel",
+      h2("2HN2H — Evaluating Knowledge Graph Completion"),
+      p("Interactive demo: Hits@k vs Top-k Log Score across datasets and folds")
+  ),
+  
   sidebarLayout(
+    
     sidebarPanel(
-      selectInput("dataset", "Choose dataset", choices = names(ALL_DATASETS), selected = "YAGO3-10"),
-      sliderInput("k", "k (top-k for Hits@k and top-k log score)", min = 1, max = 100, value = 10),
-      sliderInput("n_sample_triples", "Number of distinct triples to inspect (sample)", min = 5, max = 80, value = 20),
-      numericInput("seed", "Random seed (for sampling triples)", value = 42, min = 1),
-      actionButton("resample", "Resample triples"),
-      hr(),
-      checkboxInput("show_all_folds_metrics", "Show per-fold bars (rather than mean±CI)", value = FALSE),
-      downloadButton("download_combined_csv", "Download combined CSV (all folds)"),
-      width = 3
+      width = 3,
+      
+      h4("Configuration"),
+      
+      selectInput(
+        "dataset",
+        "Dataset",
+        choices = c("YAGO3-10","WN18RR","FB15k-237")
+      ),
+      
+      sliderInput(
+        "k",
+        "Top-k value",
+        min = 1,
+        max = 100,
+        value = 10
+      ),
+      
+      sliderInput(
+        "n_sample_triples",
+        "Triples to inspect",
+        min = 5,
+        max = 80,
+        value = 20
+      ),
+      
+      numericInput(
+        "seed",
+        "Random seed",
+        value = 42
+      ),
+      
+      br(),
+      
+      actionBttn(
+        "resample",
+        "Resample Triples",
+        style = "gradient",
+        color = "primary"
+      ),
+      
+      br(),br(),
+      
+      checkboxInput(
+        "show_all_folds_metrics",
+        "Show individual folds"
+      ),
+      
+      downloadButton(
+        "download_combined_csv",
+        "Download Dataset"
+      )
+      
     ),
+    
     mainPanel(
+      
       tabsetPanel(
-        tabPanel("Metrics overview",
-                 fluidRow(
-                   column(6, plotOutput("hits_barplot", height = 340)),
-                   column(6, plotOutput("logk_barplot", height = 340))
-                 ),
-                 br(),
-                 fluidRow(
-                   column(6, plotOutput("stability_plot", height = 360)),
-                   column(6, plotOutput("position_vs_logk", height = 360))
-                 )
+        id="tabs",
+        
+        tabPanel(
+          "Model Evaluation",
+          
+          br(),
+          
+          fluidRow(
+            
+            column(
+              6,
+              card(
+                card_header("Hits@k Performance"),
+                card_body(
+                  shinycssloaders::withSpinner(plotOutput("hits_barplot", height=350))
+                )
+              )
+            ),
+            
+            column(
+              6,
+              card(
+                card_header("Top-k Log Score"),
+                card_body(
+                  shinycssloaders::withSpinner(plotOutput("logk_barplot", height=350))
+                )
+              )
+            )
+            
+          ),
+          
+          br(),
+          
+          fluidRow(
+            
+            column(
+              6,
+              card(
+                card_header("Prediction Stability Across Folds"),
+                card_body(
+                  shinycssloaders::withSpinner(plotOutput("stability_plot", height=350))
+                )
+              )
+            ),
+            
+            column(
+              6,
+              card(
+                card_header("Rank vs Log-Score"),
+                card_body(
+                  shinycssloaders::withSpinner(plotOutput("position_vs_logk", height=350))
+                )
+              )
+            )
+            
+          )
+          
         ),
-        tabPanel("Triples inspector",
-                 br(),
-                 fluidRow(
-                   column(6, DTOutput("triples_table_summary")),
-                   column(6,
-                          h4("Per-fold details for selected triple"),
-                          uiOutput("selected_triple_ui"),
-                          DTOutput("triple_fold_table"),
-                          br(),
-                          h5("Top-100 for chosen fold (entities and scores)"),
-                          selectInput("fold_for_top100", "Fold for top-100 display", choices = as.character(1:15)),
-                          DTOutput("top100_table")
-                   )
-                 )
+        
+        tabPanel(
+          "Triple Inspector",
+          
+          br(),
+          
+          fluidRow(
+            
+            column(
+              6,
+              card(
+                card_header("Sampled Triples Summary"),
+                card_body(
+                  DTOutput("triples_table_summary")
+                )
+              )
+            ),
+            
+            column(
+              6,
+              card(
+                card_header("Prediction Details Across Folds"),
+                card_body(
+                  
+                  uiOutput("selected_triple_ui"),
+                  
+                  br(),
+                  
+                  DTOutput("triple_fold_table"),
+                  
+                  br(),
+                  
+                  selectInput(
+                    "fold_for_top100",
+                    "Fold for Top-100 Predictions",
+                    choices = as.character(1:15)
+                  ),
+                  
+                  DTOutput("top100_table")
+                  
+                )
+              )
+            )
+            
+          )
+          
         ),
-        tabPanel("Raw preview",
-                 br(),
-                 DTOutput("raw_preview")
+        
+        tabPanel(
+          "Dataset Preview",
+          
+          br(),
+          
+          card(
+            card_header("Raw Data Preview"),
+            card_body(
+              DTOutput("raw_preview")
+            )
+          )
+          
         )
+        
       )
     )
   )
@@ -272,6 +464,15 @@ ui <- fluidPage(
 # ---------- Server ------------
 
 server <- function(input, output, session) {
+  
+  theme_set(
+    theme_minimal(base_size = 14) +
+      theme(
+        plot.title = element_text(face="bold", size=16),
+        axis.title = element_text(size=12),
+        panel.grid.minor = element_blank()
+      )
+  )
   
   # Reactive: get current dataset tibble
   ds_all <- reactive({
@@ -322,7 +523,7 @@ server <- function(input, output, session) {
     per_fold <- res$per_fold
     if (input$show_all_folds_metrics) {
       ggplot(per_fold, aes(x = factor(fold), y = hits_at_k)) +
-        geom_col() +
+        geom_col(fill = hits_color) +
         geom_hline(aes(yintercept = mean(hits_at_k)), color = "red", linetype = "dashed") +
         labs(title = paste0("Hits@", input$k, " per fold (red dashed = mean)"),
              x = "Fold", y = paste0("Hits@", input$k)) +
@@ -336,7 +537,7 @@ server <- function(input, output, session) {
       ci_high <- mean_hits + 1.96 * se
       summary_df <- tibble(metric = "Hits@k", mean = mean_hits, ci_low = ci_low, ci_high = ci_high)
       ggplot(summary_df, aes(x = metric, y = mean)) +
-        geom_col(width = 0.4, fill = "steelblue") +
+        geom_col(width = 0.4, fill = hits_color) +
         geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.12) +
         geom_text(aes(label = sprintf("%.3f", mean)), vjust = -1.2) +
         ylim(0,1) +
@@ -351,7 +552,7 @@ server <- function(input, output, session) {
     per_fold <- res$per_fold
     if (input$show_all_folds_metrics) {
       ggplot(per_fold, aes(x = factor(fold), y = mean_logk)) +
-        geom_col() +
+        geom_col(fill = hits_color) +
         geom_hline(aes(yintercept = mean(mean_logk)), color = "red", linetype = "dashed") +
         labs(title = paste0("Mean top-k log score per fold (k=", input$k, ")"),
              x = "Fold", y = "mean top-k log score (-log prob)") +

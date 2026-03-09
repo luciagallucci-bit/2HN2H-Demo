@@ -1,6 +1,11 @@
 
 # To Hit or Not To Hit: A Demo
-# Authors: Gian Mario Sangiovanni, Lucia Gallucci e boh, gli altri
+# Authors: 
+# Donatella Firmani
+# Lorenzo Balzotti 
+# Gian Mario Sangiovanni,
+# Lucia Gallucci
+# Giovanna Jona Lasinio
 
 # Brief Description: 
 
@@ -27,7 +32,7 @@ accent     <- "#5DADE2"
 
 # Utility functions ------------------------------------------------------------
 
-softmax_from_logits <- function(logits) {
+softmax_from_logits <- function(logits) { # sum_exp trick to avoid numerical problems
   ex <- exp(logits - max(logits))
   ex / sum(ex)
 }
@@ -40,14 +45,14 @@ softmax_from_logits <- function(logits) {
 
 compute_logk_from_meta <- function(position, softmax_true, sum_exp_all, top100_cumexp, n_entities, k) {
   
-  if (k >= n_entities) {
+  if (k >= n_entities) { # this is just a check
     # if k covers all entities, the probabilistic top-k equals the model's distribution => -log(softmax_true)
     return(-log(max(softmax_true, 1e-300)))
   }
   
   if (position <= k) {
     # true tail inside top-k: probability equals its softmax
-    return(-log(max(softmax_true, 1e-300)))
+    return(-log(max(softmax_true, 1e-300))) 
   } 
   
   else {
@@ -68,22 +73,22 @@ compute_logk_from_meta <- function(position, softmax_true, sum_exp_all, top100_c
     pi_k <- max(pi_k, 1e-300)
     return(-log(pi_k))
   }
-}
+} # this function is ok!
 
 # Helper to compute mean and 95% CI across folds
-summarize_across_folds <- function(df, value_col) {
+summarize_across_folds <- function(df, value_col = fold) {
   df %>%
-    group_by(fold) %>% # here df is already per-fold per-triple aggregate; but we'll compute per-fold metrics first
-    summarise(.groups = "drop")
+    group_by(value_col) %>% # here df is already per-fold per-triple aggregate; but we'll compute per-fold metrics first
+    summarise(.groups = "drop") # value col is the name of the folder columns
 }
+#dati <- read.table("train_YAGO3-10.txt", blank.lines.skip = FALSE, col.names = c("head", "relation", "tail"))
 
 # ---------- Data generator (datasets × 15 folds) ------------
-
+#dati <- read.table(file ="train_WN18RR.txt", col.names = c("head", "relation", "tail"), 
+                   #blank.lines.skip = FALSE)
+#dati <- dati[1:100, ]
 generate_dataset_with_folds <- function(dataset_name,
-                                        n_entities = 500,
-                                        n_triples = 300,
                                         folds = 15,
-                                        entity_prefix = "E",
                                         seed = NULL) {
   
   # Returns a tibble with one row per (fold, triple) containing:
@@ -92,19 +97,32 @@ generate_dataset_with_folds <- function(dataset_name,
   # top100_cumexp (numeric cumexp vector length 100), sum_exp_all, n_entities
   
   if (!is.null(seed)) set.seed(seed)
-  entities <- paste0(entity_prefix, seq_len(n_entities))
+  dati <- read.table(dataset_name, col.names = c("head", "relation", "tail"), 
+                     blank.lines.skip = FALSE)[1:300, ]
+  # entities <- paste0(entity_prefix, seq_len(n_entities)) # for now generate fake entities (why?)
   
   # create base test triples (same across folds)
-  heads <- paste0("h_", sample(letters, n_triples, replace = TRUE), sample(1000:9999, n_triples, replace = TRUE))
-  relations <- paste0("r_", sample(1:200, n_triples, replace = TRUE))
-  tails_idx <- sample(seq_len(n_entities), n_triples, replace = TRUE)
-  tails <- entities[tails_idx]
+  # heads <- paste0("h_", sample(letters, n_triples, replace = TRUE), sample(1000:9999, n_triples, replace = TRUE))
+  # relations <- paste0("r_", sample(1:200, n_triples, replace = TRUE))
+  # tails_idx <- sample(seq_len(n_entities), n_triples, replace = TRUE)
+  # tails <- entities[tails_idx]
   
-  base_triples <- tibble(head = heads, relation = relations, tail = tails, tail_idx = tails_idx)
+  heads <- as.character(dati$head)
+  relations <- as.character(dati$relation)
+  tails <- as.character(dati$tail)
+  entities <- unique(c(dati$head, dati$tail))
+  n_entities <- length(entities)
+  entity_map <- setNames(seq_along(entities), entities)
+  tails_idx <- entity_map[tails]
   
+  # base_triples <- tibble(head = heads, relation = relations, tail = tails, tail_idx = tails_idx)
+  base_triples <- tibble(head = heads, relation = relations, tail = tails, tails_idx = tails_idx)
   # For each fold we simulate logits ensuring the true tail has the specified position and top100 coherence
   
-  rows <- list()
+  n_rows <- folds * nrow(base_triples)
+  rows <- vector("list", n_rows)
+  
+  idx <- 1
   for (f in seq_len(folds)) {
     for (i in seq_len(nrow(base_triples))) {
       bt <- base_triples[i, ]
@@ -115,13 +133,14 @@ generate_dataset_with_folds <- function(dataset_name,
         if (n_entities >= 21) {
           pos <- sample(21:n_entities, 1)
         } else {
-          pos <- sample(seq_len(n_entities), 1)
+          pos <- sample(seq_len(n_entities), 1) # security check useles
         }
       }
+     
       
       # generate sorted scores (descending) and corresponding exps
       scores_sorted <- sort(rnorm(n_entities, mean = 0, sd = 1), decreasing = TRUE)
-      exps_sorted <- exp(scores_sorted - max(scores_sorted)) * exp(max(scores_sorted)) # stable but equivalent to exp(scores_sorted)
+      #exps_sorted <- exp(scores_sorted - max(scores_sorted)) * exp(max(scores_sorted)) # stable but equivalent to exp(scores_sorted)
       
       # exps_sorted may be huge; we will compute sum_exp_all in stable manner
       # but since we use differences in numerator/denominator we can use exp(scores - max) approach:
@@ -130,12 +149,12 @@ generate_dataset_with_folds <- function(dataset_name,
       max_score <- max(scores_sorted)
       exps_norm <- exp(scores_sorted - max_score)
       sum_exps_norm <- sum(exps_norm)
-      sum_exp_all <- sum_exps_norm * exp(max_score)  # keep this; but we'll use normalized approach below to avoid overflow
+      #sum_exp_all <- sum_exps_norm * exp(max_score)  # keep this; but we'll use normalized approach below to avoid overflow
       
       # Build a random permutation of entity indices to assign ranks, but force the true tail to be at index 'pos'
       
       perm <- sample(seq_len(n_entities))
-      true_idx <- as.integer(bt$tail_idx)
+      true_idx <- as.integer(bt$tails_idx)
       
       # ensure perm[pos] == true_idx by swapping elements
       
@@ -170,7 +189,7 @@ generate_dataset_with_folds <- function(dataset_name,
       
       # sum_exps_norm is sum(exp(scores - max_score)), but we used logits_stable to compute probs; however ratio of top100_cumexp_norm/sum_exps_norm equals mass_topk.
       # store metadata
-      rows[[length(rows) + 1]] <- list(
+      rows[[idx]] <- list(
         dataset = dataset_name,
         fold = f,
         head = bt$head,
@@ -186,6 +205,7 @@ generate_dataset_with_folds <- function(dataset_name,
         sum_exps_norm = sum_exps_norm,               # scalar (for normalization to compute mass_topk)
         n_entities = n_entities
       )
+      idx = idx + 1
     }
   }
   
@@ -213,12 +233,13 @@ generate_dataset_with_folds <- function(dataset_name,
 # ---------- Build all three datasets (simulate) -------------
 # NOTE: choose sizes moderate so interactive app is responsive. Adjust as desired.
 
+
 generate_all_datasets <- function(seed = 2026) {
   set.seed(seed)
   list(
-    "YAGO3-10" = generate_dataset_with_folds("YAGO3-10", n_entities = 1200, n_triples = 300, folds = 15, entity_prefix = "Y_", seed = seed + 1),
-    "WN18RR"  = generate_dataset_with_folds("WN18RR",  n_entities = 600,  n_triples = 240, folds = 15, entity_prefix = "W_", seed = seed + 2),
-    "FB15k-237" = generate_dataset_with_folds("FB15k-237", n_entities = 2000, n_triples = 400, folds = 15, entity_prefix = "F_", seed = seed + 3)
+    "YAGO3-10" = generate_dataset_with_folds("train_YAGO3-10.txt", folds = 15, seed = seed + 1),
+    "WN18RR"  = generate_dataset_with_folds("train_WN18RR.txt", folds = 15,  seed = seed + 2),
+    "FB15k-237" = generate_dataset_with_folds("train_FB15k-237.txt", folds = 15, seed = seed + 3)
   )
 }
 

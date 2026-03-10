@@ -12,6 +12,7 @@
 
 # install.packages(c("bslib","shinyWidgets"))
 # install.packages("shinycssloaders")
+# install.packages("arrow")
 
 # Libraries
 library(shiny)
@@ -23,7 +24,26 @@ library(DT)
 library(stringr)
 library(bslib)
 library(shinyWidgets)
+library(arrow)
 
+# path <- paste("YAGO RotatE/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
+# df_yago <- data.frame()
+# str(dff)
+# for (i in 1:length(path)) {
+#   dff <- read_parquet(file = path[i])
+#   dff$top_100_scores <- as.list(dff$top_100_scores)
+#   dff$top_100_entities <- as.list(dff$top_100_entities)
+#   dff$fold = i
+#   df_yago <- rbind(df_yago, dff)
+# }
+# head(df_yago)
+# 
+# write_parquet(
+#   df_yago, 
+#   sink = "combined_YAGO3_10_RotatE.parquet",
+#   compression = "zstd",
+#   compression_level = 10 
+# )
 # Main colors ------------------------------------------------------------------
 
 hits_color <- "#2E86C1"

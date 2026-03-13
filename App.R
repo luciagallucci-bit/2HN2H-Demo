@@ -1,6 +1,7 @@
-
 # To Hit or Not To Hit: A Demo
-# Authors: 
+# Authors:
+# Marco Lattanzi
+# Johannes Resin
 # Donatella Firmani
 # Lorenzo Balzotti 
 # Gian Mario Sangiovanni,
@@ -107,25 +108,89 @@ summarize_across_folds <- function(df, value_col = fold) {
 #dati <- read.table(file ="train_WN18RR.txt", col.names = c("head", "relation", "tail"), 
                    #blank.lines.skip = FALSE)
 #dati <- dati[1:100, ]
-generate_dataset_with_folds <- function(dataset_name,
-                                        folds = 15,
-                                        seed = NULL) {
+dataset_name = "YAGO3_10"
+model_name = "RotatE"
+dati = read_parquet(file = "combined_YAGO3_10_RotatE.parquet")
+read_dataset_with_folds <- function(dataset_name,
+                                    model_name) { # this is the function to read and preprocess correctly the dataset 
   
   # Returns a tibble with one row per (fold, triple) containing:
   # head, relation, tail, fold, position, score (logit of true tail),
   # softmax_true, top100_scores (numeric vector), top100_entities (char vector),
   # top100_cumexp (numeric cumexp vector length 100), sum_exp_all, n_entities
+  file_path <- paste("combined_", paste(dataset_name, sep = "", "_"), model_name, ".parquet", sep = "") # define the path of the parquet file
+  train_path <- paste("train_", dataset_name, ".txt", sep = "") # training data --> i think it is not useful
+  dati <- read_parquet(file_path) # import the corresponding data
+  dati_train <- read.table(train_path, col.names = c("head", "relation", "tail"), 
+                     blank.lines.skip = FALSE) 
+  head <- as.character(dati$head) # head in test set
+  relations <- as.character(dati$relation) # relations in test set
+  tails <- as.character(dati$tail) # tails in test set
+  n_entities <- length(c(tails, head)) # total number of entities inside the test set
+  # it you want to use Chebyshev inequality, Recall fr(|X_{i} - \mu| > \sigma \epsilon) <= 1/\epsilon^2
+  # set 1/epsilon^2 = 0.05 and obtaint
+  eps <- sqrt(1/0.05)
+  dati |> 
+    group_by(fold) |> 
+    summarise(
+      across(
+        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, `hits@50`, `hits@100`, mrr, log_1_sparse, log_1_softmax,  
+          log_3_sparse, log_3_softmax, log_10_sparse, log_10_softmax, log_20_sparse, log_20_softmax, log_50_sparse, 
+          log_50_softmax, log_100_sparse, log_100_softmax),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          # Chebyshev Lower Bound (capped at 0 minimum)
+          ci_low = ~mean(.x, na.rm = TRUE) - 
+                           eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
+          # Chebyshev Upper Bound (capped at 1 maximum)
+          ci_high = ~mean(.x, na.rm = TRUE) + 
+                            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
+        ),
+        .names = "{.col}_{.fn}" 
+      )
+    ) -> results_matrix
+  k_range <- c(1, 3, 10, 20, 50, 100)
+  best_position <- matrix(NA, nrow = nrow(dati), ncol = 9) # here we work more at a tuple level 
+  colnames(best_position) <- c("entity_position", "softmax_score", "fold", paste("k", k_range, sep = "_"))
+  best_position[, "fold"] <- dati$fold
+  for (i in 1:nrow(best_position)) {
+    if (tails[i] %in% dati$top_100_entities[i][[1]]) {
+      best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
+      best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
+      exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
+      best_position[i, 4:9] <- sapply(k_range, FUN = function(k){
+        if (best_position[i,1] <= k) {
+          -log(best_position[i, 2])
+          
+        }
+        else{
+          mass_topk <- cumsum(exp_score[1:k])[k]
+          -log((1 - mass_topk) / (n_entities - k))
+          
+          
+        }
+        
+      })
+      
+        
+    }
+    if (is.na(best_position[i, 1]) ) {
+      best_position[i, 1] <- 101
+      best_position[i, 4:9] <- sapply(k_range, FUN = function(k){
+          mass_topk <- cumsum(exp_score[1:k])[k]
+          -log((1 - mass_topk) / (n_entities - k))
+          
+          
+        })
+    }
+    
+      
+    }
+  results_matrix$log_1_softmax_mean
   
-  if (!is.null(seed)) set.seed(seed)
-  dati <- read.table(dataset_name, col.names = c("head", "relation", "tail"), 
-                     blank.lines.skip = FALSE)[1:300, ]
-  # entities <- paste0(entity_prefix, seq_len(n_entities)) # for now generate fake entities (why?)
-  
-  # create base test triples (same across folds)
-  # heads <- paste0("h_", sample(letters, n_triples, replace = TRUE), sample(1000:9999, n_triples, replace = TRUE))
-  # relations <- paste0("r_", sample(1:200, n_triples, replace = TRUE))
-  # tails_idx <- sample(seq_len(n_entities), n_triples, replace = TRUE)
-  # tails <- entities[tails_idx]
+  mean(best_position[best_position[,3] == 1,4])
+  dati$top_100_scores[[2]][[7]]
+
   
   heads <- as.character(dati$head)
   relations <- as.character(dati$relation)

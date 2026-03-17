@@ -26,6 +26,7 @@ library(stringr)
 library(bslib)
 library(shinyWidgets)
 library(arrow)
+library(renv)
 
 # path <- paste("YAGO RotatE/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
 # df_yago <- data.frame()
@@ -221,8 +222,8 @@ ui <- fluidPage(
   ),
   
   div(class="title-panel",
-      h2("2HN2H — Evaluating Knowledge Graph Completion"),
-      p("Interactive demo: Hits@k, MRR & Log Score stratified by Dataset & Model")
+      h2("To Hit or not to Hit"),
+      p("Interactive demo")
   ),
   
   sidebarLayout(

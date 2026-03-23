@@ -1,6 +1,8 @@
+
 # To Hit or Not To Hit: A Demo
+
 # Authors:
-# Marco Lattanzi
+# Marco Lattanzio
 # Johannes Resin
 # Donatella Firmani
 # Lorenzo Balzotti 
@@ -9,7 +11,6 @@
 # Giovanna Jona Lasinio
 
 # Brief Description: bla bla bla 
-
 
 # install.packages(c("bslib","shinyWidgets"))
 # install.packages("shinycssloaders")
@@ -199,7 +200,6 @@ read_dataset_with_folds <- function(dataset_name,
 
 
 # ---------- UI ------------
-
 ui <- fluidPage(
   
   theme = bs_theme(
@@ -213,10 +213,10 @@ ui <- fluidPage(
   
   tags$head(
     tags$style(HTML("
-    body { background-color: #F7F9FC; }
-    .title-panel { background: linear-gradient(90deg,#1F4E79,#2E86C1); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-    .card { border-radius: 10px; box-shadow: 0px 2px 10px rgba(0,0,0,0.05); }
-    .control-label { font-weight: 600; }
+      body { background-color: #F7F9FC; }
+      .title-panel { background: linear-gradient(90deg,#1F4E79,#2E86C1); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+      .card { border-radius: 10px; box-shadow: 0px 2px 10px rgba(0,0,0,0.05); }
+      .control-label { font-weight: 600; }
     "))
   ),
   
@@ -243,7 +243,6 @@ ui <- fluidPage(
       numericInput("seed", "Random seed", value = 42),
       
       actionBttn("resample", "Fetch Triples", style = "gradient", color = "primary"),
-      helpText(""),
       br(),
       
       radioGroupButtons(
@@ -260,48 +259,102 @@ ui <- fluidPage(
     
     mainPanel(
       tabsetPanel(
-        id="tabs",
+        id = "tabs",
+        
+        # ---------- Model Evaluation ----------
         tabPanel("Model Evaluation",
                  br(),
                  fluidRow(
-                   column(12, card(card_header("Hits@k & MRR Performance"), 
-                                   card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height=400)))))
+                   column(12, card(
+                     card_header("Hits@k & MRR Performance"), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height = 400)))
+                   ))
                  ),
                  br(),
                  fluidRow(
-                   column(6, card(card_header("Top-k Log Score"), 
-                                  card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height=350))))),
-                   column(6, card(card_header("Rank vs Top-k Log Score"), 
-                                  card_body(shinycssloaders::withSpinner(plotOutput("position_vs_logk", height=350)))))
+                   column(6, card(
+                     card_header("Top-k Log Score"), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height = 350)))
+                   )),
+                   column(6, card(
+                     card_header("Rank vs Top-k Log Score"), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("position_vs_logk", height = 350)))
+                   ))
                  )
         ),
+        
+        # ---------- Cross-Fold Analysis ----------
+        tabPanel("Cross-Fold Analysis",
+                 br(),
+                 fluidRow(
+                   # Colonna Settings
+                   column(3,
+                          card(
+                            card_header("Settings"),
+                            card_body(
+                              selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
+                              checkboxInput("random_fold", "Use random fold", value = FALSE),
+                              helpText("Select a fold to compare its Log-K scores against all other folds."),
+                              selectInput("cf_hits_k", "Hits@k (Cross-Fold)", choices = c(1, 3, 10, 20, 50, 100), selected = 10)
+                            )
+                          )
+                   ),
+                   # Colonna Plot
+                   column(9,
+                          fluidRow(
+                            column(6, card(
+                              card_header("Cross-Fold Log-K Consistency"),
+                              card_body(
+                                shinycssloaders::withSpinner(plotOutput("crossfold_logk", height = 400))
+                              )
+                            )),
+                            column(6, card(
+                              card_header("Cross-Fold Hits@k"),
+                              card_body(
+                                shinycssloaders::withSpinner(plotOutput("crossfold_hits", height = 400))
+                              )
+                            ))
+                          )
+                   )
+                 )
+        ),
+        
+        # ---------- Triple Inspector ----------
         tabPanel("Triple Inspector",
                  br(),
                  fluidRow(
-                   column(12, card(card_header("Sampled Triples Summary (with Tuple-Level Chebyshev CIs)"), 
-                                   card_body(DTOutput("triples_table_summary"))))
+                   column(12, card(
+                     card_header("Sampled Triples Summary (with Tuple-Level Chebyshev CIs)"), 
+                     card_body(DTOutput("triples_table_summary"))
+                   ))
                  ),
                  fluidRow(
-                   column(5, card(card_header("Prediction Details Across Folds"), card_body(
-                     uiOutput("selected_triple_ui"), br(),
-                     DTOutput("triple_fold_table")
-                   ))),
-                   column(7, card(card_header("Tuple-Level Variance Across Folds"), card_body(
-                     fluidRow(
-                       column(6, plotOutput("tuple_ci_plot_logk", height=250)),
-                       column(6, plotOutput("tuple_ci_plot_mrr", height=250))
-                     ),
-                     br(),
-                     selectInput("fold_for_top100", "Fold for Top-100 Predictions", choices = as.character(1:15)),
-                     DTOutput("top100_table")
-                   )))
+                   column(5, card(
+                     card_header("Prediction Details Across Folds"), 
+                     card_body(
+                       uiOutput("selected_triple_ui"), br(),
+                       DTOutput("triple_fold_table")
+                     )
+                   )),
+                   column(7, card(
+                     card_header("Tuple-Level Variance Across Folds"), 
+                     card_body(
+                       fluidRow(
+                         column(6, plotOutput("tuple_ci_plot_logk", height = 250)),
+                         column(6, plotOutput("tuple_ci_plot_mrr", height = 250))
+                       ),
+                       br(),
+                       selectInput("fold_for_top100", "Fold for Top-100 Predictions", choices = as.character(1:15)),
+                       DTOutput("top100_table")
+                     )
+                   ))
                  )
         )
+        
       )
     )
   )
 )
-
 # ---------- Server ------------
 
 server <- function(input, output, session) {
@@ -640,6 +693,88 @@ server <- function(input, output, session) {
     filename = function() paste0("metrics_", input$dataset, "_", input$model, "_", Sys.Date(), ".csv"),
     content = function(file) { write.csv(res_matrix(), file, row.names = FALSE) }
   )
+  
+  # -- Lorenzo plot: fold selection --
+  ref_fold_selected <- reactive({
+    if (isTRUE(input$random_fold)) {
+      sample(unique(best_pos()$fold), 1)
+    } else {
+      as.integer(input$ref_fold)
+    }
+  })
+ 
+  output$crossfold_logk <- renderPlot({
+    req(best_pos(), input$k)
+    
+    bp <- best_pos()
+    k_col <- paste0("k_", input$k)
+    ref_fold <- ref_fold_selected()  # reactive
+    
+    # --- Unique triples ---
+    triples_unique <- bp %>% distinct(head, relation, tail)
+    
+    # Se vuoi fare campionamento opzionale, puoi aggiungere input$n_triples_cf
+    # Altrimenti prendi tutti i triple
+    sampled_triples <- triples_unique
+    
+    bp_sampled <- bp %>% semi_join(sampled_triples, by = c("head", "relation", "tail"))
+    
+    # --- LogK nel fold di riferimento ---
+    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>% select(head, relation, tail, ref_logk = .data[[k_col]])
+    
+    # --- Merge con tutti i fold ---
+    merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
+    
+    # --- Plot ---
+    ggplot(merged, aes(x = ref_logk, y = entity_position)) +
+      geom_jitter(alpha = 0.4, width = 0, height = 1, color = "#8E44AD") +
+      scale_y_reverse() +  # rank: 1 = best → in alto
+      labs(
+        title = paste0("Rank Distribution vs Log-", input$k),
+        subtitle = paste0("Reference Fold = ", ref_fold),
+        x = paste0("Log-", input$k, " (Reference Fold)"),
+        y = "Rank (Position across folds)"
+      ) +
+      theme_minimal()
+  })
+  
+  # -- Lorenzo plot: scatter cross-fold --
+  outputOptions(output, "crossfold_logk", suspendWhenHidden = TRUE)
+  
+  # -- Con gli hits --
+  output$crossfold_hits <- renderPlot({
+    req(best_pos(), input$cf_hits_k)
+    
+    bp <- best_pos()
+    k_val <- as.numeric(input$cf_hits_k)
+    hit_col <- paste0("k_", k_val)   # usa lo stesso log-k ma trasformiamo in hit
+    ref_fold <- ref_fold_selected()   # reactive già definito
+    
+    # estrai triple uniche e filtra sul fold di riferimento
+    triples_unique <- bp %>% distinct(head, relation, tail)
+    
+    bp_sampled <- bp %>% semi_join(triples_unique, by = c("head", "relation", "tail"))
+    
+    # Hit@k: 1 se position <= k, 0 altrimenti
+    bp_sampled <- bp_sampled %>% mutate(Hit_k = ifelse(entity_position <= k_val, 1, 0))
+    
+    # fold di riferimento
+    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>%
+      select(head, relation, tail, ref_hit = Hit_k)
+    
+    merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
+    
+    ggplot(merged, aes(x = ref_hit, y = entity_position)) +
+      geom_jitter(alpha = 0.4, width = 0.1, height = 1, color = "#2980B9") +
+      scale_y_reverse() +
+      labs(
+        title = paste0("Rank vs Hit@", k_val, " (Cross-Fold)"),
+        subtitle = paste0("Reference Fold = ", ref_fold),
+        x = paste0("Hit@", k_val, " (Reference Fold)"),
+        y = "Rank (Position across folds)"
+      ) +
+      theme_minimal()
+  })
 }
 
 shinyApp(ui = ui, server = server)

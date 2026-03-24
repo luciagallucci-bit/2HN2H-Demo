@@ -7,6 +7,9 @@ rsconnect::deployApp(
    appFiles = c(
      "app.R", "renv.lock",
      "combined_YAGO3_10_RotatE.parquet",
+     "combined_YAGO3_10_ComplEx.parquet",
+     "combined_YAGO3_10_MurE.parquet",
+     "combined_YAGO3_10_HolE.parquet",
      "train_YAGO3_10.txt"
    )
  )

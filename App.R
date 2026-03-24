@@ -17,6 +17,7 @@
 # install.packages("arrow")
 
 # Libraries
+
 library(shiny)
 library(ggplot2)
 library(dplyr)
@@ -29,7 +30,9 @@ library(shinyWidgets)
 library(arrow)
 library(renv)
 
-# path <- paste("YAGO RotatE/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
+
+# path <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
+# path_hole <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_HolE.parquet", sep = "")
 # df_yago <- data.frame()
 # str(dff)
 # for (i in 1:length(path)) {
@@ -42,11 +45,67 @@ library(renv)
 # head(df_yago)
 # 
 # write_parquet(
-#   df_yago, 
+#   df_yago,
 #   sink = "combined_YAGO3_10_RotatE.parquet",
 #   compression = "zstd",
-#   compression_level = 10 
+#   compression_level = 10
 # )
+# 
+# 
+# df_yago_hole <- data.frame()
+# for (i in 1:length(path)) {
+#   dff <- read_parquet(file = path_hole[i])
+#   dff$top_100_scores <- as.list(dff$top_100_scores)
+#   dff$top_100_entities <- as.list(dff$top_100_entities)
+#   dff$fold = i
+#   df_yago_hole <- rbind(df_yago_hole, dff)
+# }
+# head(df_yago_hole)
+# 
+# write_parquet(
+#   df_yago_hole,
+#   sink = "combined_YAGO3_10_HolE.parquet",
+#   compression = "zstd",
+#   compression_level = 10
+# )
+# 
+# path_MurE <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_MurE.parquet", sep = "")
+# df_yago_MurE <- data.frame()
+# for (i in 1:length(path)) {
+#   dff <- read_parquet(file = path_MurE[i])
+#   dff$top_100_scores <- as.list(dff$top_100_scores)
+#   dff$top_100_entities <- as.list(dff$top_100_entities)
+#   dff$fold = i
+#   df_yago_MurE <- rbind(df_yago_MurE, dff)
+# }
+# head(df_yago_MurE)
+# 
+# write_parquet(
+#   df_yago_MurE,
+#   sink = "combined_YAGO3_10_MurE.parquet",
+#   compression = "zstd",
+#   compression_level = 10
+# )
+# 
+# 
+# path_complex <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_ComplEx.parquet", sep = "")
+# df_yago_complex <- data.frame()
+# for (i in 1:length(path)) {
+#   dff <- read_parquet(file = path_complex[i])
+#   dff$top_100_scores <- as.list(dff$top_100_scores)
+#   dff$top_100_entities <- as.list(dff$top_100_entities)
+#   dff$fold = i
+#   df_yago_complex <- rbind(df_yago_complex, dff)
+# }
+# head(df_yago_complex)
+# 
+# write_parquet(
+#   df_yago_complex,
+#   sink = "combined_YAGO3_10_ComplEx.parquet",
+#   compression = "zstd",
+#   compression_level = 10
+# )
+
 # Main colors ------------------------------------------------------------------
 
 hits_color <- "#2E86C1"
@@ -111,7 +170,7 @@ summarize_across_folds <- function(df, value_col = fold) {
 #blank.lines.skip = FALSE)
 #dati <- dati[1:100, ]
 dataset_name = "YAGO3_10"
-model_name = "RotatE"
+model_name = "MurE"
 #dati = read_parquet(file = "combined_YAGO3_10_RotatE.parquet")
 read_dataset_with_folds <- function(dataset_name,
                                     model_name) { # this is the function to read and preprocess correctly the dataset 
@@ -120,7 +179,10 @@ read_dataset_with_folds <- function(dataset_name,
   # head, relation, tail, fold, position, score (logit of true tail),
   # softmax_true, top100_scores (numeric vector), top100_entities (char vector),
   # top100_cumexp (numeric cumexp vector length 100), sum_exp_all, n_entities
-  file_path <- paste("combined_", paste(dataset_name, sep = "", "_"), model_name, ".parquet", sep = "") # define the path of the parquet file
+  ds <- as.character(dataset_name[1])
+  md <- as.character(model_name[1])
+  file_path <- paste0("combined_", ds, "_", md, ".parquet")
+  #file_path <- paste("combined_", paste(dataset_name, sep = "", "_"), model_name, ".parquet", sep = "") # define the path of the parquet file
   train_path <- paste("train_", dataset_name, ".txt", sep = "") # training data --> i think it is not useful
   dati <- read_parquet(file_path) # import the corresponding data
   dati_train <- read.table(train_path, col.names = c("head", "relation", "tail"), 
@@ -136,9 +198,8 @@ read_dataset_with_folds <- function(dataset_name,
     group_by(fold) |> 
     summarise(
       across(
-        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, `hits@50`, `hits@100`, mrr, log_1_sparse, log_1_softmax,  
-          log_3_sparse, log_3_softmax, log_10_sparse, log_10_softmax, log_20_sparse, log_20_softmax, log_50_sparse, 
-          log_50_softmax, log_100_sparse, log_100_softmax),
+        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, log_1_sparse, log_1_softmax,  
+          log_3_sparse, log_3_softmax, log_10_sparse, log_10_softmax, log_20_sparse, log_20_softmax),
         list(
           mean = ~mean(.x, na.rm = TRUE),
           # Chebyshev Lower Bound (capped at 0 minimum)
@@ -151,8 +212,8 @@ read_dataset_with_folds <- function(dataset_name,
         .names = "{.col}_{.fn}" 
       )
     ) -> results_matrix
-  k_range <- c(1, 3, 10, 20, 50, 100)
-  best_position <- matrix(NA, nrow = nrow(dati), ncol = 14) # here we work more at a tuple level 
+  k_range <- c(1, 3, 10, 20)
+  best_position <- matrix(NA, nrow = nrow(dati), ncol = 12) # here we work more at a tuple level 
   best_position <- as.data.frame(best_position)
   colnames(best_position) <- c("entity_position", "softmax_score", "fold", paste("k", k_range, sep = "_"), "head", "relation", "tail", "top_100_scores", "top_100_entities")
   best_position[, "fold"] <- dati$fold
@@ -166,7 +227,7 @@ read_dataset_with_folds <- function(dataset_name,
       best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
       best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
       exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
-      best_position[i, 4:9] <- sapply(k_range, FUN = function(k){
+      best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         if (best_position[i,1] <= k) {
           -log(best_position[i, 2])
           
@@ -184,7 +245,7 @@ read_dataset_with_folds <- function(dataset_name,
     }
     if (is.na(best_position[i, 1]) ) {
       best_position[i, 1] <- 101
-      best_position[i, 4:9] <- sapply(k_range, FUN = function(k){
+      best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         mass_topk <- cumsum(exp_score[1:k])[k]
         -log((1 - mass_topk) / (n_entities - k))
         
@@ -233,8 +294,8 @@ ui <- fluidPage(
       h4("Configuration"),
       
       selectInput("dataset", "Dataset", choices = c("YAGO3_10")),
-      selectInput("model", "Model", choices = c("RotatE")),
-      selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20", "50", "100"), selected = "10"),
+      selectInput("model", "Model", choices = c("RotatE", "HolE", "MurE", "ComplEx")),
+      selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20"), selected = "10"),
       
       hr(),
       h5("Inspector Settings"),
@@ -296,7 +357,7 @@ ui <- fluidPage(
                               selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
                               checkboxInput("random_fold", "Use random fold", value = FALSE),
                               helpText("Select a fold to compare its Log-K scores against all other folds."),
-                              selectInput("cf_hits_k", "Hits@k (Cross-Fold)", choices = c(1, 3, 10, 20, 50, 100), selected = 10)
+                              selectInput("cf_hits_k", "Hits@k (Cross-Fold)", choices = c(1, 3, 10, 20), selected = 10)
                             )
                           )
                    ),
@@ -373,12 +434,13 @@ server <- function(input, output, session) {
   processed_data <- reactive({
     req(input$dataset, input$model)
     tryCatch({
-      read_dataset_with_folds(input$dataset, input$model)
+      read_dataset_with_folds(as.character(input$dataset), as.character(input$model))
     }, error = function(e) {
-      showNotification(paste("Data not found for", input$dataset, input$model), type = "error")
+      showNotification(paste("Data not found for", as.character(input$dataset), as.character(input$model)), type = "error")
       return(NULL)
     })
   })
+  
   
   res_matrix <- reactive({ req(processed_data()); processed_data()$results_matrix })
   best_pos <- reactive({ req(processed_data()); processed_data()$best_position })
@@ -584,11 +646,11 @@ server <- function(input, output, session) {
         Hit_k = ifelse(entity_position <= k_val, 1, 0)
       ) %>%
       arrange(fold) %>%
-      select(fold, entity_position, MRR, Hit_k, k_1, k_3, k_10, k_20, k_50, k_100) %>%
+      select(fold, entity_position, MRR, Hit_k, k_1, k_3, k_10, k_20) %>%
       mutate(across(starts_with("k_"), ~round(.x, 4)))
     
     datatable(triple_rows, options = list(pageLength = 5, scrollX = TRUE), 
-              colnames = c("Fold", "Rank", "MRR", paste0("Hits@", k_val), "Log-1", "Log-3", "Log-10", "Log-20", "Log-50", "Log-100"))
+              colnames = c("Fold", "Rank", "MRR", paste0("Hits@", k_val), "Log-1", "Log-3", "Log-10", "Log-20"))
   })
   
   # --- Tuple CI Plot 1: LOG-K SCORES ---
@@ -600,7 +662,7 @@ server <- function(input, output, session) {
     
     tuple_data <- best_pos() %>% 
       filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail) %>%
-      select(fold, k_1, k_3, k_10, k_20, k_50, k_100)
+      select(fold, k_1, k_3, k_10, k_20)
     
     n_folds <- nrow(tuple_data)
     
@@ -638,21 +700,19 @@ server <- function(input, output, session) {
         `Hits@1` = as.numeric(entity_position <= 1),
         `Hits@3` = as.numeric(entity_position <= 3),
         `Hits@10` = as.numeric(entity_position <= 10),
-        `Hits@20` = as.numeric(entity_position <= 20),
-        `Hits@50` = as.numeric(entity_position <= 50),
-        `Hits@100` = as.numeric(entity_position <= 100)
+        `Hits@20` = as.numeric(entity_position <= 20)
       )
     
     n_folds <- nrow(tuple_data)
     
     plot_df <- data.frame(
-      Metric = factor(c("Hits@1", "Hits@3", "Hits@10", "Hits@20", "Hits@50", "Hits@100", "MRR"), 
-                      levels = c("Hits@1", "Hits@3", "Hits@10", "Hits@20", "Hits@50", "Hits@100", "MRR")),
+      Metric = factor(c("Hits@1", "Hits@3", "Hits@10", "Hits@20", "MRR"), 
+                      levels = c("Hits@1", "Hits@3", "Hits@10", "Hits@20", "MRR")),
       Mean = c(mean(tuple_data$`Hits@1`), mean(tuple_data$`Hits@3`), mean(tuple_data$`Hits@10`), 
-               mean(tuple_data$`Hits@20`), mean(tuple_data$`Hits@50`), mean(tuple_data$`Hits@100`), 
+               mean(tuple_data$`Hits@20`), 
                mean(tuple_data$MRR)),
       SD = c(sd(tuple_data$`Hits@1`), sd(tuple_data$`Hits@3`), sd(tuple_data$`Hits@10`), 
-             sd(tuple_data$`Hits@20`), sd(tuple_data$`Hits@50`), sd(tuple_data$`Hits@100`), 
+             sd(tuple_data$`Hits@20`), 
              sd(tuple_data$MRR))
     ) %>%
       mutate(

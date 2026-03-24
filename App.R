@@ -1,4 +1,3 @@
-
 # To Hit or Not To Hit: A Demo
 
 # Authors:
@@ -29,6 +28,7 @@ library(bslib)
 library(shinyWidgets)
 library(arrow)
 library(renv)
+library(plotly)
 
 
 # path <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
@@ -356,7 +356,7 @@ ui <- fluidPage(
                             card_body(
                               selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
                               checkboxInput("random_fold", "Use random fold", value = FALSE),
-                              helpText("Select a fold to compare its Log-K scores against all other folds."),
+                              helpText("Select a fold to compare its Log-K scores against 15 other folds."),
                               selectInput("cf_hits_k", "Hits@k (Cross-Fold)", choices = c(1, 3, 10, 20), selected = 10)
                             )
                           )
@@ -364,13 +364,15 @@ ui <- fluidPage(
                    # Colonna Plot
                    column(9,
                           fluidRow(
-                            column(6, card(
+                            
+                            # Cross-Fold Analysis tab
+                            column(12, card(
                               card_header("Cross-Fold Log-K Consistency"),
                               card_body(
                                 shinycssloaders::withSpinner(plotOutput("crossfold_logk", height = 400))
                               )
                             )),
-                            column(6, card(
+                            column(12, card(
                               card_header("Cross-Fold Hits@k"),
                               card_body(
                                 shinycssloaders::withSpinner(plotOutput("crossfold_hits", height = 400))
@@ -763,40 +765,52 @@ server <- function(input, output, session) {
       as.integer(input$ref_fold)
     }
   })
- 
+  
   output$crossfold_logk <- renderPlot({
-    req(best_pos(), input$k)
+    req(best_pos(), sampled_triples(), input$k)
     
     bp <- best_pos()
     k_col <- paste0("k_", input$k)
     ref_fold <- ref_fold_selected()  # reactive
     
-    # --- Unique triples ---
-    triples_unique <- bp %>% distinct(head, relation, tail)
-    
-    # Se vuoi fare campionamento opzionale, puoi aggiungere input$n_triples_cf
-    # Altrimenti prendi tutti i triple
-    sampled_triples <- triples_unique
-    
-    bp_sampled <- bp %>% semi_join(sampled_triples, by = c("head", "relation", "tail"))
+    # --- Prendi solo le triple campionate dall'Inspector ---
+    triples_to_plot <- sampled_triples()
+    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head", "relation", "tail"))
     
     # --- LogK nel fold di riferimento ---
-    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>% select(head, relation, tail, ref_logk = .data[[k_col]])
+    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>%
+      select(head, relation, tail, ref_logk = .data[[k_col]])
     
-    # --- Merge con tutti i fold ---
+    # --- Merge con tutti gli altri fold ---
     merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
     
-    # --- Plot ---
-    ggplot(merged, aes(x = ref_logk, y = entity_position)) +
-      geom_jitter(alpha = 0.4, width = 0, height = 1, color = "#8E44AD") +
-      scale_y_reverse() +  # rank: 1 = best → in alto
+    # --- Creiamo un indice equidistante ordinato per log-k ---
+    triples_ordered <- merged %>%
+      distinct(head, relation, tail, ref_logk) %>%
+      arrange(ref_logk) %>%
+      mutate(idx = row_number())  # indice equidistante
+    
+    merged <- merged %>%
+      inner_join(triples_ordered %>% select(head, relation, tail, idx, ref_logk), 
+                 by = c("head", "relation", "tail"))
+    
+    # --- Boxplot ---
+    ggplot(merged, aes(x = factor(idx), y = entity_position, fill = factor(idx))) +
+      geom_boxplot(width = 0.2, outlier.size = 1) +
+      scale_y_reverse() +
+      scale_fill_viridis_d(option = "plasma", end = 0.8) +
+      scale_x_discrete(labels = round(triples_ordered$ref_logk, 2)) +  # log-k sotto
       labs(
         title = paste0("Rank Distribution vs Log-", input$k),
         subtitle = paste0("Reference Fold = ", ref_fold),
         x = paste0("Log-", input$k, " (Reference Fold)"),
         y = "Rank (Position across folds)"
       ) +
-      theme_minimal()
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none"
+      )
   })
   
   # -- Lorenzo plot: scatter cross-fold --
@@ -804,37 +818,51 @@ server <- function(input, output, session) {
   
   # -- Con gli hits --
   output$crossfold_hits <- renderPlot({
-    req(best_pos(), input$cf_hits_k)
+    req(best_pos(), sampled_triples(), input$cf_hits_k)
     
     bp <- best_pos()
     k_val <- as.numeric(input$cf_hits_k)
-    hit_col <- paste0("k_", k_val)   # usa lo stesso log-k ma trasformiamo in hit
-    ref_fold <- ref_fold_selected()   # reactive già definito
+    ref_fold <- ref_fold_selected()
     
-    # estrai triple uniche e filtra sul fold di riferimento
-    triples_unique <- bp %>% distinct(head, relation, tail)
+    # Prendi le stesse triple campionate
+    triples_to_plot <- sampled_triples()
+    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head", "relation", "tail"))
     
-    bp_sampled <- bp %>% semi_join(triples_unique, by = c("head", "relation", "tail"))
-    
-    # Hit@k: 1 se position <= k, 0 altrimenti
+    # Calcola Hit@k: 1 se rank <= k, 0 altrimenti
     bp_sampled <- bp_sampled %>% mutate(Hit_k = ifelse(entity_position <= k_val, 1, 0))
     
-    # fold di riferimento
+    # Fold di riferimento
     ref_data <- bp_sampled %>% filter(fold == ref_fold) %>%
       select(head, relation, tail, ref_hit = Hit_k)
     
     merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
     
-    ggplot(merged, aes(x = ref_hit, y = entity_position)) +
-      geom_jitter(alpha = 0.4, width = 0.1, height = 1, color = "#2980B9") +
+    # Ordina le triple per Hit@k del fold di riferimento e crea indice equidistante
+    triples_ordered <- merged %>% distinct(head, relation, tail, ref_hit) %>%
+      arrange(ref_hit) %>%
+      mutate(idx = row_number())
+    
+    merged <- merged %>% inner_join(triples_ordered %>% select(head, relation, tail, idx), 
+                                    by = c("head", "relation", "tail"))
+    
+    # Boxplot
+    ggplot(merged, aes(x = factor(idx), y = entity_position, fill = factor(idx))) +
+      geom_boxplot(width = 0.2, outlier.size = 1) +
       scale_y_reverse() +
+      
+      scale_fill_viridis_d(option = "plasma", end = 0.8) +
       labs(
-        title = paste0("Rank vs Hit@", k_val, " (Cross-Fold)"),
+        title = paste0("Rank Distribution vs Hit@", k_val),
         subtitle = paste0("Reference Fold = ", ref_fold),
-        x = paste0("Hit@", k_val, " (Reference Fold)"),
+        x = paste0("Sampled Triples (ordered by Hit@", k_val, ")"),
         y = "Rank (Position across folds)"
       ) +
-      theme_minimal()
+      theme_minimal() +
+      theme(
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        legend.position = "none"
+      )
   })
 }
 

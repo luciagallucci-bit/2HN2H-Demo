@@ -294,7 +294,14 @@ ui <- fluidPage(
       h4("Configuration"),
       
       selectInput("dataset", "Dataset", choices = c("YAGO3_10")),
-      selectInput("model", "Model", choices = c("RotatE", "HolE", "MurE", "ComplEx")),
+      pickerInput(
+        inputId = "model", 
+        label = "Select Models to Compare", 
+        choices = c("RotatE", "HolE", "MurE", "ComplEx"), 
+        selected = "MurE", 
+        options = list(`actions-box` = TRUE), 
+        multiple = TRUE
+      ),
       selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20"), selected = "10"),
       
       hr(),
@@ -433,14 +440,34 @@ server <- function(input, output, session) {
   )
   
   # Reactive Data Loading
+  # Inside server function:
   processed_data <- reactive({
     req(input$dataset, input$model)
-    tryCatch({
-      read_dataset_with_folds(as.character(input$dataset), as.character(input$model))
-    }, error = function(e) {
-      showNotification(paste("Data not found for", as.character(input$dataset), as.character(input$model)), type = "error")
-      return(NULL)
+    
+    # Map over all selected models and combine results
+    all_models_list <- map(input$model, function(m) {
+      tryCatch({
+        res <- read_dataset_with_folds(as.character(input$dataset), m)
+        # Add model name to the results for plotting
+        res$results_matrix$model <- m
+        res$best_position$model <- m
+        return(res)
+      }, error = function(e) {
+        showNotification(paste("Data not found for", m), type = "error")
+        return(NULL)
+      })
     })
+    
+    # Remove NULLs
+    all_models_list <- compact(all_models_list)
+    
+    if(length(all_models_list) == 0) return(NULL)
+    
+    # Combine results_matrix and best_position from all models
+    list(
+      results_matrix = bind_rows(map(all_models_list, "results_matrix")),
+      best_position = bind_rows(map(all_models_list, "best_position"))
+    )
   })
   
   
@@ -453,27 +480,41 @@ server <- function(input, output, session) {
     mat <- res_matrix()
     k_val <- input$k
     hits_mean_col <- paste0("hits@", k_val, "_mean")
-    hits_low_col <- paste0("hits@", k_val, "_ci_low")
+    hits_low_col  <- paste0("hits@", k_val, "_ci_low")
     hits_high_col <- paste0("hits@", k_val, "_ci_high")
     
     if (input$view_mode == "Per Fold") {
-      plot_data <- data.frame(
-        fold = rep(mat$fold, 2),
-        metric = c(rep(paste0("Hits@", k_val), nrow(mat)), rep("MRR", nrow(mat))),
-        mean = c(mat[[hits_mean_col]], mat$mrr_mean),
-        ci_low = c(mat[[hits_low_col]], mat$mrr_ci_low),
-        ci_high = c(mat[[hits_high_col]], mat$mrr_ci_high)
-      )
+      plot_data <- mat %>%
+        pivot_longer(
+          cols = c(all_of(hits_mean_col), mrr_mean),
+          names_to = "metric",
+          values_to = "mean"
+        ) %>%
+        mutate(
+          # Match CI columns to the specific metric
+          ci_low = ifelse(metric == "mrr_mean", mrr_ci_low, .data[[hits_low_col]]),
+          ci_high = ifelse(metric == "mrr_mean", mrr_ci_high, .data[[hits_high_col]]),
+          metric = ifelse(metric == "mrr_mean", "MRR", paste0("Hits@", k_val))
+        )
       
-      ggplot(plot_data, aes(x = factor(fold), y = mean, color = metric)) +
-        geom_point(position = position_dodge(width = 0.5), size = 3) +
+      ggplot(plot_data, aes(x = factor(fold), y = mean, color = model, shape = metric)) +
+        geom_point(position = position_dodge(width = 0.7), size = 3) +
         geom_errorbar(aes(ymin = ci_low, ymax = ci_high), 
-                      position = position_dodge(width = 0.5), width = 0.3, linewidth = 0.8) +
-        scale_color_manual(values = c("#1F4E79", "#27AE60")) +
-        labs(title = paste0("Hits@", k_val, " and MRR per Fold"), x = "Fold", y = "Score") +
-        theme(legend.position = "bottom", legend.title = element_blank())
+                      position = position_dodge(width = 0.7), width = 0.3) +
+        labs(title = "Model Comparison: Hits & MRR", x = "Fold", y = "Score") +
+        theme(legend.position = "bottom")
       
     } else {
+      # Overall Average logic (Group by model)
+      overall_data <- mat %>%
+        group_by(model) %>%
+        summarise(
+          h_mean = mean(.data[[hits_mean_col]], na.rm=T),
+          h_sd = sd(.data[[hits_mean_col]], na.rm=T),
+          m_mean = mean(mrr_mean, na.rm=T),
+          m_sd = sd(mrr_mean, na.rm=T),
+          n = n()
+        )
       # Overall Chebyshev Bounds across folds
       n_folds <- nrow(mat)
       eps <- sqrt(1/0.05)
@@ -513,32 +554,16 @@ server <- function(input, output, session) {
     mat <- res_matrix()
     k_val <- input$k
     mean_col <- paste0("log_", k_val, "_softmax_mean")
-    low_col <- paste0("log_", k_val, "_softmax_ci_low")
+    low_col  <- paste0("log_", k_val, "_softmax_ci_low")
     high_col <- paste0("log_", k_val, "_softmax_ci_high")
     
-    if (input$view_mode == "Per Fold") {
-      ggplot(mat, aes(x = factor(fold), y = .data[[mean_col]])) +
-        geom_point(color = "#E67E22", size = 3) +
-        geom_errorbar(aes(ymin = .data[[low_col]], ymax = .data[[high_col]]), width = 0.2, color = "#E67E22", linewidth = 0.8) +
-        geom_hline(aes(yintercept = mean(.data[[mean_col]], na.rm=TRUE)), color = "red", linetype = "dashed") +
-        labs(title = paste0("Mean top-", k_val, " Log Score"), x = "Fold", y = "Log Score")
-    } else {
-      # Overall Chebyshev Bounds for Log-K
-      n_folds <- nrow(mat)
-      eps <- sqrt(1/0.05)
-      
-      overall_mean <- mean(mat[[mean_col]], na.rm=TRUE)
-      overall_sd <- sd(mat[[mean_col]], na.rm=TRUE)
-      ci_low <- max(0, overall_mean - eps * (overall_sd / sqrt(n_folds)))
-      ci_high <- overall_mean + eps * (overall_sd / sqrt(n_folds))
-      
-      ggplot(data.frame(x="Overall", y=overall_mean, low=ci_low, high=ci_high), aes(x=x, y=y)) +
-        geom_point(color = "#E67E22", size = 5) +
-        geom_errorbar(aes(ymin = low, ymax = high), width = 0.1, color = "#E67E22", linewidth = 1) +
-        labs(title = paste0("Overall Mean top-", k_val, " Log Score"), 
-             subtitle = "Error bars indicate 95% Chebyshev CI",
-             x = "Dataset Avg", y = "Log Score")
-    }
+    ggplot(mat, aes(x = factor(fold), y = .data[[mean_col]], color = model)) +
+      geom_point(position = position_dodge(width = 0.5), size = 3) +
+      geom_errorbar(aes(ymin = .data[[low_col]], ymax = .data[[high_col]]), 
+                    position = position_dodge(width = 0.5), width = 0.4) +
+      labs(title = paste0("Mean top-", k_val, " Log Score Comparison"), 
+           x = "Fold", y = "Log Score") +
+      theme(legend.position = "bottom")
   })
   
   # --- Position vs LogK Score ---

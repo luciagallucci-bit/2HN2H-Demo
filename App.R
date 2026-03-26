@@ -169,8 +169,8 @@ summarize_across_folds <- function(df, value_col = fold) {
 #dati <- read.table(file ="train_WN18RR.txt", col.names = c("head", "relation", "tail"), 
 #blank.lines.skip = FALSE)
 #dati <- dati[1:100, ]
-dataset_name = "YAGO3_10"
-model_name = "MurE"
+# dataset_name = "YAGO3_10"
+# model_name = "MurE"
 #dati = read_parquet(file = "combined_YAGO3_10_RotatE.parquet")
 read_dataset_with_folds <- function(dataset_name,
                                     model_name) { # this is the function to read and preprocess correctly the dataset 
@@ -301,6 +301,12 @@ ui <- fluidPage(
         selected = "MurE", 
         options = list(`actions-box` = TRUE), 
         multiple = TRUE
+      ),
+      selectInput(
+        "model_single",
+        "Model for Detailed Analysis",
+        choices = c("RotatE", "HolE", "MurE", "ComplEx"),
+        selected = "MurE"
       ),
       selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20"), selected = "10"),
       
@@ -469,10 +475,18 @@ server <- function(input, output, session) {
       best_position = bind_rows(map(all_models_list, "best_position"))
     )
   })
-  
-  
   res_matrix <- reactive({ req(processed_data()); processed_data()$results_matrix })
-  best_pos <- reactive({ req(processed_data()); processed_data()$best_position })
+  best_pos   <- reactive({ req(processed_data()); processed_data()$best_position })
+
+  
+  res_matrix_single <- reactive({
+    req(res_matrix(), input$model_single)
+    res_matrix() %>% filter(model == input$model_single)
+  })
+  best_pos_single <- reactive({
+    req(best_pos(), input$model_single)
+    best_pos() %>% filter(model == input$model_single)
+  })
   
   # --- Unified Forest Plot: Hits@k and MRR ---
   output$unified_metrics_plot <- renderPlot({
@@ -587,11 +601,11 @@ server <- function(input, output, session) {
   
   # --- Resampling Filtered Triples ---
   sampled_triples <- eventReactive(input$resample, {
-    req(best_pos())
+    req(best_pos_single())
     set.seed(input$seed)
     
     # Calculate stats per triple across folds
-    triple_stats <- best_pos() %>%
+    triple_stats <-best_pos_single() %>%
       group_by(head, relation, tail) %>%
       summarise(
         mean_rank = mean(entity_position, na.rm = TRUE),
@@ -619,12 +633,12 @@ server <- function(input, output, session) {
   
   # --- Triples summary table (Rank, MRR, LogK) ---
   output$triples_table_summary <- renderDT({
-    req(best_pos(), sampled_triples(), input$k)
+    req(best_pos_single(), sampled_triples(), input$k)
     
     eps <- sqrt(1/0.05) 
     k_col <- paste0("k_", input$k)
     
-    stat <- best_pos() %>%
+    stat <- best_pos_single() %>%
       mutate(mrr = 1 / entity_position) %>%
       group_by(head, relation, tail) %>%
       summarise(
@@ -661,12 +675,12 @@ server <- function(input, output, session) {
   
   # --- Fold Details Table (Showing Rank, MRR, Hits@k + All Log-K scores) ---
   output$triple_fold_table <- renderDT({
-    req(input$selected_triple_idx, best_pos(), input$k)
+    req(input$selected_triple_idx, best_pos_single(), input$k)
     sel_idx <- as.integer(strsplit(input$selected_triple_idx, ":")[[1]][1])
     chosen <- sampled_triples()[sel_idx, ]
     k_val <- as.numeric(input$k)
     
-    triple_rows <- best_pos() %>% 
+    triple_rows <- best_pos_single() %>% 
       filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail) %>%
       mutate(
         MRR = round(1 / entity_position, 4),
@@ -682,12 +696,12 @@ server <- function(input, output, session) {
   
   # --- Tuple CI Plot 1: LOG-K SCORES ---
   output$tuple_ci_plot_logk <- renderPlot({
-    req(input$selected_triple_idx, best_pos())
+    req(input$selected_triple_idx, best_pos_single())
     sel_idx <- as.integer(strsplit(input$selected_triple_idx, ":")[[1]][1])
     chosen <- sampled_triples()[sel_idx, ]
     eps <- sqrt(1/0.05)
     
-    tuple_data <- best_pos() %>% 
+    tuple_data <-best_pos_single()%>% 
       filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail) %>%
       select(fold, k_1, k_3, k_10, k_20)
     
@@ -715,12 +729,12 @@ server <- function(input, output, session) {
   
   # --- Tuple CI Plot 2: MRR & Hits@k (UPDATED) ---
   output$tuple_ci_plot_mrr <- renderPlot({
-    req(input$selected_triple_idx, best_pos())
+    req(input$selected_triple_idx, best_pos_single())
     sel_idx <- as.integer(strsplit(input$selected_triple_idx, ":")[[1]][1])
     chosen <- sampled_triples()[sel_idx, ]
     eps <- sqrt(1/0.05)
     
-    tuple_data <- best_pos() %>% 
+    tuple_data <-best_pos_single() %>% 
       filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail) %>%
       mutate(
         MRR = 1 / entity_position,
@@ -763,12 +777,12 @@ server <- function(input, output, session) {
   
   # --- Top 100 predictions ---
   output$top100_table <- renderDT({
-    req(input$selected_triple_idx, best_pos(), input$fold_for_top100)
+    req(input$selected_triple_idx, best_pos_single(), input$fold_for_top100)
     sel_idx <- as.integer(strsplit(input$selected_triple_idx, ":")[[1]][1])
     chosen <- sampled_triples()[sel_idx, ]
     fold_sel <- as.integer(input$fold_for_top100)
     
-    row <- best_pos() %>% filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail, fold == fold_sel)
+    row <- best_pos_single() %>% filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail, fold == fold_sel)
     if (nrow(row) == 0) return(datatable(tibble(note = "No data"), options = list(dom = 't')))
     
     ents <- unlist(row$top_100_entities[[1]])
@@ -779,22 +793,22 @@ server <- function(input, output, session) {
   
   output$download_combined_csv <- downloadHandler(
     filename = function() paste0("metrics_", input$dataset, "_", input$model, "_", Sys.Date(), ".csv"),
-    content = function(file) { write.csv(res_matrix(), file, row.names = FALSE) }
+    content = function(file) { write.csv(res_matrix_single(), file, row.names = FALSE) }
   )
   
   # -- Lorenzo plot: fold selection --
   ref_fold_selected <- reactive({
     if (isTRUE(input$random_fold)) {
-      sample(unique(best_pos()$fold), 1)
+      sample(unique(best_pos_single()$fold), 1)
     } else {
       as.integer(input$ref_fold)
     }
   })
   
   output$crossfold_logk <- renderPlot({
-    req(best_pos(), sampled_triples(), input$k)
+    req(best_pos_single(), sampled_triples(), input$k)
     
-    bp <- best_pos()
+    bp <- best_pos_single()
     k_col <- paste0("k_", input$k)
     ref_fold <- ref_fold_selected()  # reactive
     
@@ -843,9 +857,9 @@ server <- function(input, output, session) {
   
   # -- Con gli hits --
   output$crossfold_hits <- renderPlot({
-    req(best_pos(), sampled_triples(), input$cf_hits_k)
+    req(best_pos_single(), sampled_triples(), input$cf_hits_k)
     
-    bp <- best_pos()
+    bp <- best_pos_single()
     k_val <- as.numeric(input$cf_hits_k)
     ref_fold <- ref_fold_selected()
     

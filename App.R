@@ -214,9 +214,9 @@ read_dataset_with_folds <- function(dataset_name,
       )
     ) -> results_matrix
   k_range <- c(1, 3, 10, 20)
-  best_position <- matrix(NA, nrow = nrow(dati), ncol = 12) # here we work more at a tuple level 
+  best_position <- matrix(NA, nrow = nrow(dati), ncol = 13) # here we work more at a tuple level 
   best_position <- as.data.frame(best_position)
-  colnames(best_position) <- c("entity_position", "softmax_score", "fold", paste("k", k_range, sep = "_"), "head", "relation", "tail", "top_100_scores", "top_100_entities")
+  colnames(best_position) <- c("entity_position", "softmax_score", "fold", paste("k", k_range, sep = "_"), "mrr", "head", "relation", "tail", "top_100_scores", "top_100_entities")
   best_position[, "fold"] <- dati$fold
   best_position[, "head"] <- head
   best_position[, "tail"] <- tails
@@ -225,7 +225,9 @@ read_dataset_with_folds <- function(dataset_name,
   best_position$top_100_entities <- dati$top_100_entities
   for (i in 1:nrow(best_position)) {
     if (tails[i] %in% dati$top_100_entities[i][[1]]) {
-      best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
+      best_position[i,1] <- dati$hits[i]
+      best_position[i, 8] <- 1/dati$hits[i]
+      #best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
       best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
       exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
       best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
@@ -246,6 +248,7 @@ read_dataset_with_folds <- function(dataset_name,
     }
     if (is.na(best_position[i, 1]) ) {
       best_position[i, 1] <- dati$hits[i]
+      best_position[i, 8] <- 1/dati$hits[i]
       best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         mass_topk <- cumsum(exp_score[1:k])[k]
         -log((1 - mass_topk) / (n_entities - k))
@@ -373,8 +376,7 @@ ui <- fluidPage(
                             card_body(
                               selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
                               checkboxInput("random_fold", "Use random fold", value = FALSE),
-                              helpText("Select a fold to compare its Log-K scores against 15 other folds."),
-                              selectInput("cf_hits_k", "Hits@k (Cross-Fold)", choices = c(1, 3, 10, 20), selected = 10)
+                              helpText("Select a fold to compare its Log-K scores against 15 other folds.")
                             )
                           )
                    ),
@@ -859,46 +861,44 @@ server <- function(input, output, session) {
   # -- Lorenzo plot: scatter cross-fold --
   outputOptions(output, "crossfold_logk", suspendWhenHidden = TRUE)
   
-  # -- Con gli hits --
-  output$crossfold_hits <- renderPlot({
-    req(best_pos_single(), sampled_triples(), input$cf_hits_k)
+  # -- MRR plot --
+  output$crossfold_mrr <- renderPlot({
+    req(best_pos_single(), sampled_triples())
     
     bp <- best_pos_single()
-    k_val <- as.numeric(input$cf_hits_k)
     ref_fold <- ref_fold_selected()
     
-    # Prendi le stesse triple campionate
     triples_to_plot <- sampled_triples()
-    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head", "relation", "tail"))
+    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head","relation","tail"))
     
-    # Calcola Hit@k: 1 se rank <= k, 0 altrimenti
-    bp_sampled <- bp_sampled %>% mutate(Hit_k = ifelse(entity_position <= k_val, 1, 0))
+    bp_sampled <- bp_sampled %>%
+      mutate(MRR = 1 / entity_position)
     
-    # Fold di riferimento
-    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>%
-      select(head, relation, tail, ref_hit = Hit_k)
+    ref_data <- bp_sampled %>%
+      filter(fold == ref_fold) %>%
+      select(head, relation, tail, ref_mrr = mrr)
     
-    merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
+    merged <- bp_sampled %>%
+      inner_join(ref_data, by = c("head","relation","tail"))
     
-    # Ordina le triple per Hit@k del fold di riferimento e crea indice equidistante
-    triples_ordered <- merged %>% distinct(head, relation, tail, ref_hit) %>%
-      arrange(ref_hit) %>%
+    triples_ordered <- merged %>%
+      distinct(head, relation, tail, ref_mrr) %>%
+      arrange(ref_mrr) %>%
       mutate(idx = row_number())
     
-    merged <- merged %>% inner_join(triples_ordered %>% select(head, relation, tail, idx), 
-                                    by = c("head", "relation", "tail"))
+    merged <- merged %>%
+      inner_join(triples_ordered %>% select(head, relation, tail, idx),
+                 by = c("head","relation","tail"))
     
-    # Boxplot
     ggplot(merged, aes(x = factor(idx), y = entity_position, fill = factor(idx))) +
       geom_boxplot(width = 0.2, outlier.size = 1) +
       scale_y_reverse() +
-      
       scale_fill_viridis_d(option = "plasma", end = 0.8) +
       labs(
-        title = paste0("Rank Distribution vs Hit@", k_val),
+        title = "Rank Distribution vs MRR",
         subtitle = paste0("Reference Fold = ", ref_fold),
-        x = paste0("Sampled Triples (ordered by Hit@", k_val, ")"),
-        y = "Rank (Position across folds)"
+        x = "Triples ordered by MRR (reference fold)",
+        y = "Rank"
       ) +
       theme_minimal() +
       theme(

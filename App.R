@@ -316,6 +316,12 @@ ui <- fluidPage(
         selected = "MurE"
       ),
       selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20"), selected = "10"),
+      sliderInput("max_rank_filter",
+                  "Filter rank:",
+                  min  = 100,
+                  max  = 5000,
+                  value = 1000,
+                  step = 100),
       
       hr(),
       h5("Inspector Settings"),
@@ -375,7 +381,16 @@ ui <- fluidPage(
                             card_header("Settings"),
                             card_body(
                               selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
-                              checkboxInput("random_fold", "Use random fold", value = FALSE),
+                              selectInput("crossfold_metric",
+                                          "Metrics",
+                                          choices = c(
+                                            "Log Softmax (orig)"    = "orig_softmax",
+                                            "Log Sparse Softmax"    = "sparse_softmax",
+                                            "Brier Softmax (orig)"  = "orig_brier",
+                                            "Brier Sparse Softmax"  = "sparse_brier"
+                                          ),
+                                          selected = "orig_softmax"),
+                               checkboxInput("random_fold", "Use random fold", value = FALSE),
                               helpText("Select a fold to compare its Log-K scores against 15 other folds.")
                             )
                           )
@@ -392,9 +407,9 @@ ui <- fluidPage(
                               )
                             )),
                             column(12, card(
-                              card_header("Cross-Fold Hits@k"),
+                              card_header("Cross-Fold MRR"),
                               card_body(
-                                shinycssloaders::withSpinner(plotOutput("crossfold_hits", height = 400))
+                                shinycssloaders::withSpinner(plotOutput("crossfold_mrr", height = 400))
                               )
                             ))
                           )
@@ -494,6 +509,12 @@ server <- function(input, output, session) {
     best_pos() %>% filter(model == input$model_single)
   })
   
+  bp_sampled_reactive <- reactive({
+    req(best_pos_single(), sampled_triples())
+    best_pos_single() %>%
+      semi_join(sampled_triples(), by = c("head", "relation", "tail"))
+  })
+  
   # --- Unified Forest Plot: Hits@k and MRR ---
   output$unified_metrics_plot <- renderPlot({
     req(res_matrix())
@@ -588,23 +609,28 @@ server <- function(input, output, session) {
   
   # --- Position vs LogK Score ---
   output$position_vs_logk <- renderPlot({
-    req(best_pos(), input$k)
-    bp <- best_pos()
+    req(best_pos(), input$k, input$max_rank_filter)   
+    bp    <- best_pos()
     k_col <- paste0("k_", input$k)
     
     stat <- bp %>%
       group_by(head, relation, tail) %>%
       summarise(
-        mean_position = mean(entity_position, na.rm=TRUE), 
-        mean_logk = mean(.data[[k_col]], na.rm=TRUE), 
+        mean_position = mean(entity_position, na.rm = TRUE),
+        mean_logk     = mean(.data[[k_col]], na.rm = TRUE),
         .groups = "drop"
-      )
+      ) %>%
+      filter(mean_position <= input$max_rank_filter)   # <-- unica riga aggiunta
     
     ggplot(stat, aes(x = mean_position, y = mean_logk)) +
-      geom_jitter(alpha = 0.4, height = 0, width = 0.6, color="#8E44AD") +
-      labs(title = paste0("Mean rank vs Mean Top-", input$k, " Log Score"), x = "Mean Rank", y = paste0("Mean Top-", input$k, " Log Score"))
-  })
-  
+      geom_jitter(alpha = 0.4, height = 0, width = 0.6, color = "#8E44AD") +
+      labs(
+        title    = paste0("Mean rank vs Mean Top-", input$k, " Log Score"),
+        subtitle = paste0("Showing triples with mean rank ≤ ", input$max_rank_filter),
+        x = "Mean Rank",
+        y = paste0("Mean Top-", input$k, " Log Score")
+      )
+  })  
   # --- Resampling Filtered Triples ---
   sampled_triples <- eventReactive(input$resample, {
     req(best_pos_single())
@@ -811,101 +837,81 @@ server <- function(input, output, session) {
     }
   })
   
+  crossfold_metric_col <- reactive({
+    req(input$crossfold_metric, input$k)
+    paste0(input$crossfold_metric, "_", input$k)
+  })
+  
+  
   output$crossfold_logk <- renderPlot({
-    req(best_pos_single(), sampled_triples(), input$k)
+    req(bp_sampled_reactive(), input$k)
+    k_col    <- paste0("k_", input$k)
+    ref_fold <- ref_fold_selected()
+    bp_s     <- bp_sampled_reactive()
     
-    bp <- best_pos_single()
-    k_col <- paste0("k_", input$k)
-    ref_fold <- ref_fold_selected()  # reactive
-    
-    # --- Prendi solo le triple campionate dall'Inspector ---
-    triples_to_plot <- sampled_triples()
-    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head", "relation", "tail"))
-    
-    # --- LogK nel fold di riferimento ---
-    ref_data <- bp_sampled %>% filter(fold == ref_fold) %>%
+    ref_data <- bp_s %>%
+      filter(fold == ref_fold) %>%
       select(head, relation, tail, ref_logk = .data[[k_col]])
     
-    # --- Merge con tutti gli altri fold ---
-    merged <- bp_sampled %>% inner_join(ref_data, by = c("head", "relation", "tail"))
-    
-    # --- Creiamo un indice equidistante ordinato per log-k ---
-    triples_ordered <- merged %>%
-      distinct(head, relation, tail, ref_logk) %>%
-      arrange(ref_logk) %>%
-      mutate(idx = row_number())  # indice equidistante
-    
-    merged <- merged %>%
-      inner_join(triples_ordered %>% select(head, relation, tail, idx, ref_logk), 
-                 by = c("head", "relation", "tail"))
-    
-    # --- Boxplot ---
-    ggplot(merged, aes(x = factor(idx), y = entity_position, fill = factor(idx))) +
-      geom_boxplot(width = 0.2, outlier.size = 1) +
-      scale_y_reverse() +
-      scale_fill_viridis_d(option = "plasma", end = 0.8) +
-      scale_x_discrete(labels = round(triples_ordered$ref_logk, 2)) +  # log-k sotto
-      labs(
-        title = paste0("Rank Distribution vs Log-", input$k),
-        subtitle = paste0("Reference Fold = ", ref_fold),
-        x = paste0("Log-", input$k, " (Reference Fold)"),
-        y = "Rank (Position across folds)"
-      ) +
-      theme_minimal() +
-      theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "none"
+    merged <- bp_s %>%
+      inner_join(ref_data, by = c("head", "relation", "tail")) %>%
+      inner_join(
+        ref_data %>% arrange(ref_logk) %>% mutate(idx = row_number()) %>%
+          select(head, relation, tail, idx),
+        by = c("head", "relation", "tail")
       )
+    
+    labels_x <- merged %>%
+      distinct(idx, ref_logk) %>% arrange(idx) %>%
+      pull(ref_logk) %>% round(2)
+    
+    ggplot(merged, aes(x = factor(idx), y = entity_position)) +
+      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#2E86C1", alpha = 0.6) +
+      scale_y_reverse() +
+      scale_x_discrete(labels = labels_x) +
+      labs(title    = paste0("Rank Distribution vs Log-", input$k),
+           subtitle = paste0("Reference Fold = ", ref_fold),
+           x        = paste0("Log-", input$k, " (Reference Fold)"),
+           y        = "Rank") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1),
+            legend.position = "none")
   })
+  
   
   # -- Lorenzo plot: scatter cross-fold --
   outputOptions(output, "crossfold_logk", suspendWhenHidden = TRUE)
   
   # -- MRR plot --
   output$crossfold_mrr <- renderPlot({
-    req(best_pos_single(), sampled_triples())
-    
-    bp <- best_pos_single()
+    req(bp_sampled_reactive())
     ref_fold <- ref_fold_selected()
+    bp_s     <- bp_sampled_reactive()
     
-    triples_to_plot <- sampled_triples()
-    bp_sampled <- bp %>% semi_join(triples_to_plot, by = c("head","relation","tail"))
-    
-    bp_sampled <- bp_sampled %>%
-      mutate(MRR = 1 / entity_position)
-    
-    ref_data <- bp_sampled %>%
+    ref_data <- bp_s %>%
       filter(fold == ref_fold) %>%
-      select(head, relation, tail, ref_mrr = mrr)
+      mutate(ref_mrr = 1 / entity_position) %>%
+      select(head, relation, tail, ref_mrr)
     
-    merged <- bp_sampled %>%
-      inner_join(ref_data, by = c("head","relation","tail"))
-    
-    triples_ordered <- merged %>%
-      distinct(head, relation, tail, ref_mrr) %>%
-      arrange(ref_mrr) %>%
-      mutate(idx = row_number())
-    
-    merged <- merged %>%
-      inner_join(triples_ordered %>% select(head, relation, tail, idx),
-                 by = c("head","relation","tail"))
-    
-    ggplot(merged, aes(x = factor(idx), y = entity_position, fill = factor(idx))) +
-      geom_boxplot(width = 0.2, outlier.size = 1) +
-      scale_y_reverse() +
-      scale_fill_viridis_d(option = "plasma", end = 0.8) +
-      labs(
-        title = "Rank Distribution vs MRR",
-        subtitle = paste0("Reference Fold = ", ref_fold),
-        x = "Triples ordered by MRR (reference fold)",
-        y = "Rank"
-      ) +
-      theme_minimal() +
-      theme(
-        axis.text.x = element_blank(),
-        axis.ticks.x = element_blank(),
-        legend.position = "none"
+    merged <- bp_s %>%
+      inner_join(ref_data, by = c("head", "relation", "tail")) %>%
+      inner_join(
+        ref_data %>% arrange(ref_mrr) %>% mutate(idx = row_number()) %>%
+          select(head, relation, tail, idx),
+        by = c("head", "relation", "tail")
       )
+    
+    ggplot(merged, aes(x = factor(idx), y = entity_position)) +
+      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#27AE60", alpha = 0.6) +
+      scale_y_reverse() +
+      labs(title    = "Rank Distribution vs MRR",
+           subtitle = paste0("Reference Fold = ", ref_fold),
+           x        = "Triples ordered by MRR",
+           y        = "Rank") +
+      theme_minimal() +
+      theme(axis.text.x  = element_blank(),
+            axis.ticks.x = element_blank(),
+            legend.position = "none")
   })
 }
 

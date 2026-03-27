@@ -224,12 +224,12 @@ read_dataset_with_folds <- function(dataset_name,
   best_position$top_100_scores <- dati$top_100_scores
   best_position$top_100_entities <- dati$top_100_entities
   for (i in 1:nrow(best_position)) {
+    exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
     if (tails[i] %in% dati$top_100_entities[i][[1]]) {
       best_position[i,1] <- dati$hits[i]
       best_position[i, 8] <- 1/dati$hits[i]
       #best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
       best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
-      exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
       best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         if (best_position[i,1] <= k) {
           -log(best_position[i, 2])
@@ -286,7 +286,7 @@ ui <- fluidPage(
   ),
   
   div(class="title-panel",
-      h2("To Hit or not to Hit"),
+      h2(" To Hit or not to Hit: Computing accuracy of Knowledge Graph Completion Tasks with Proper Scores"),
       p("Interactive demo")
   ),
   
@@ -842,76 +842,110 @@ server <- function(input, output, session) {
     paste0(input$crossfold_metric, "_", input$k)
   })
   
-  
   output$crossfold_logk <- renderPlot({
-    req(bp_sampled_reactive(), input$k)
-    k_col    <- paste0("k_", input$k)
-    ref_fold <- ref_fold_selected()
-    bp_s     <- bp_sampled_reactive()
+    req(bp_sampled_reactive(), input$k, input$crossfold_metric, input$max_rank_filter)
+    
+    metric_prefix <- input$crossfold_metric
+    
+    # Mapping 'orig_softmax' back to your 'k_' columns for backwards compatibility
+    if (metric_prefix == "orig_softmax") {
+      k_col <- paste0("k_", input$k)
+    } else {
+      k_col <- paste0(metric_prefix, "_", input$k)
+    }
+    
+    # Defensive check: ensure the column actually exists in the data
+    bp_s <- bp_sampled_reactive()
+    if (!k_col %in% names(bp_s)) {
+      showNotification(paste("Metric column", k_col, "not found in triple data."), type = "warning")
+      return(NULL)
+    }
+    
+    # 3. Reference Fold Logic
+    # Use a reactive or input to define which fold is the 'baseline' for the X-axis
+    ref_fold <- if (input$random_fold) sample(unique(bp_s$fold), 1) else as.numeric(input$ref_fold)
     
     ref_data <- bp_s %>%
       filter(fold == ref_fold) %>%
-      select(head, relation, tail, ref_logk = .data[[k_col]])
+      select(head, relation, tail, ref_score = .data[[k_col]])
     
+    # 4. Data Merging & Sorting
+    # We join the reference score back to all folds to see how Rank varies 
+    # for triples that had a specific score in the reference fold.
     merged <- bp_s %>%
       inner_join(ref_data, by = c("head", "relation", "tail")) %>%
       inner_join(
-        ref_data %>% arrange(ref_logk) %>% mutate(idx = row_number()) %>%
+        ref_data %>% 
+          arrange(ref_score) %>% 
+          mutate(idx = row_number()) %>%
           select(head, relation, tail, idx),
         by = c("head", "relation", "tail")
       )
     
+    # Create X-axis labels based on the scores from the reference fold
     labels_x <- merged %>%
-      distinct(idx, ref_logk) %>% arrange(idx) %>%
-      pull(ref_logk) %>% round(2)
+      distinct(idx, ref_score) %>% 
+      arrange(idx) %>%
+      pull(ref_score) %>% 
+      round(2)
     
+    # 5. The Plot
     ggplot(merged, aes(x = factor(idx), y = entity_position)) +
-      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#2E86C1", alpha = 0.6) +
-      scale_y_reverse() +
-      scale_x_discrete(labels = labels_x) +
-      labs(title    = paste0("Rank Distribution vs Log-", input$k),
-           subtitle = paste0("Reference Fold = ", ref_fold),
-           x        = paste0("Log-", input$k, " (Reference Fold)"),
-           y        = "Rank") +
+      geom_boxplot(width = 0.4, outlier.size = 1, fill = "#2E86C1", alpha = 0.6) +
+      # We set the limits from the filter value down to 1
+      scale_y_reverse(limits = c(input$max_rank_filter, 1)) + 
+      scale_x_discrete(labels = function(x) round(as.numeric(x), 2)) +
+      labs(
+        title    = paste0("Rank Distribution vs ", input$crossfold_metric),
+        subtitle = paste0("Zoomed to Rank 1 - ", input$max_rank_filter),
+        x        = "Reference Score",
+        y        = "Entity Rank"
+      ) +
       theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1),
-            legend.position = "none")
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
   })
   
   
   # -- Lorenzo plot: scatter cross-fold --
   outputOptions(output, "crossfold_logk", suspendWhenHidden = TRUE)
-  
+
   # -- MRR plot --
   output$crossfold_mrr <- renderPlot({
-    req(bp_sampled_reactive())
+    req(bp_sampled_reactive(), input$max_rank_filter)
     ref_fold <- ref_fold_selected()
     bp_s     <- bp_sampled_reactive()
     
+    # 1. Prepare reference data 
+    # Sort MRR from lowest (e.g., 0.001) to highest (1.0)
     ref_data <- bp_s %>%
       filter(fold == ref_fold) %>%
       mutate(ref_mrr = 1 / entity_position) %>%
-      select(head, relation, tail, ref_mrr)
+      select(head, relation, tail, ref_mrr) %>%
+      arrange(ref_mrr) %>% 
+      mutate(idx = row_number()) # Assigns X-axis order based on the sort
     
+    # 2. Merge back to the sampled data to get distributions across all folds
     merged <- bp_s %>%
-      inner_join(ref_data, by = c("head", "relation", "tail")) %>%
-      inner_join(
-        ref_data %>% arrange(ref_mrr) %>% mutate(idx = row_number()) %>%
-          select(head, relation, tail, idx),
-        by = c("head", "relation", "tail")
-      )
+      inner_join(ref_data, by = c("head", "relation", "tail"))
     
+    # 3. Plot with standard Reverse Scale
     ggplot(merged, aes(x = factor(idx), y = entity_position)) +
-      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#27AE60", alpha = 0.6) +
-      scale_y_reverse() +
-      labs(title    = "Rank Distribution vs MRR",
-           subtitle = paste0("Reference Fold = ", ref_fold),
-           x        = "Triples ordered by MRR",
-           y        = "Rank") +
+      geom_boxplot(width = 0.5, outlier.size = 1, fill = "#27AE60", alpha = 0.6) +
+      # Keeps the scale linear, but puts Rank 1 (the best) at the top
+      scale_y_reverse(limits = c(input$max_rank_filter, 1))+
+      labs(
+        title    = "Rank Distribution vs MRR",
+        subtitle = paste0("Reference Fold = ", ref_fold, " | Sorted: Worst (Left) to Best (Right)"),
+        x        = "Triples (Ordered by Reference MRR)",
+        y        = "Rank (Linear Scale)"
+      ) +
       theme_minimal() +
-      theme(axis.text.x  = element_blank(),
-            axis.ticks.x = element_blank(),
-            legend.position = "none")
+      theme(
+        axis.text.x  = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none"
+      )
   })
 }
 

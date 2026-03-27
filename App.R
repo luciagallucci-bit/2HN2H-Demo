@@ -31,8 +31,8 @@ library(renv)
 library(plotly)
 
 
-# path <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
-# path_hole <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_HolE.parquet", sep = "")
+# path <- paste("df_result_fold_", 0:14, "_YAGO3_10_RotatE.parquet", sep = "")
+# path_hole <- paste("df_result_fold_", 0:14, "_YAGO3_10_HolE.parquet", sep = "")
 # df_yago <- data.frame()
 # str(dff)
 # for (i in 1:length(path)) {
@@ -50,7 +50,7 @@ library(plotly)
 #   compression = "zstd",
 #   compression_level = 10
 # )
-# 
+
 # 
 # df_yago_hole <- data.frame()
 # for (i in 1:length(path)) {
@@ -69,7 +69,7 @@ library(plotly)
 #   compression_level = 10
 # )
 # 
-# path_MurE <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_MurE.parquet", sep = "")
+# path_MurE <- paste("df_result_fold_", 0:14, "_YAGO3_10_MurE.parquet", sep = "")
 # df_yago_MurE <- data.frame()
 # for (i in 1:length(path)) {
 #   dff <- read_parquet(file = path_MurE[i])
@@ -86,9 +86,9 @@ library(plotly)
 #   compression = "zstd",
 #   compression_level = 10
 # )
+
 # 
-# 
-# path_complex <- paste("YAGO3_10/df_result_fold_", 0:14, "_YAGO3_10_ComplEx.parquet", sep = "")
+# path_complex <- paste("df_result_fold_", 0:14, "_YAGO3_10_ComplEx.parquet", sep = "")
 # df_yago_complex <- data.frame()
 # for (i in 1:length(path)) {
 #   dff <- read_parquet(file = path_complex[i])
@@ -169,8 +169,8 @@ summarize_across_folds <- function(df, value_col = fold) {
 #dati <- read.table(file ="train_WN18RR.txt", col.names = c("head", "relation", "tail"), 
 #blank.lines.skip = FALSE)
 #dati <- dati[1:100, ]
-# dataset_name = "YAGO3_10"
-# model_name = "MurE"
+dataset_name = "YAGO3_10"
+model_name = "MurE"
 #dati = read_parquet(file = "combined_YAGO3_10_RotatE.parquet")
 read_dataset_with_folds <- function(dataset_name,
                                     model_name) { # this is the function to read and preprocess correctly the dataset 
@@ -198,8 +198,9 @@ read_dataset_with_folds <- function(dataset_name,
     group_by(fold) |> 
     summarise(
       across(
-        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, log_1_sparse, log_1_softmax,  
-          log_3_sparse, log_3_softmax, log_10_sparse, log_10_softmax, log_20_sparse, log_20_softmax),
+        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, sparse_softmax_1, sparse_softmax_3, sparse_softmax_10, sparse_softmax_20, 
+          orig_softmax_1, orig_softmax_3, orig_softmax_10, orig_softmax_20,
+          sparse_brier_1, sparse_brier_3, sparse_brier_10, sparse_brier_20, orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20),
         list(
           mean = ~mean(.x, na.rm = TRUE),
           # Chebyshev Lower Bound (capped at 0 minimum)
@@ -244,7 +245,7 @@ read_dataset_with_folds <- function(dataset_name,
       
     }
     if (is.na(best_position[i, 1]) ) {
-      best_position[i, 1] <- 101
+      best_position[i, 1] <- dati$hits[i]
       best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         mass_topk <- cumsum(exp_score[1:k])[k]
         -log((1 - mass_topk) / (n_entities - k))
@@ -253,9 +254,8 @@ read_dataset_with_folds <- function(dataset_name,
       })
     }
     
-    
   }
-  
+
   output <- list(results_matrix = results_matrix, best_position = best_position)
   return(output)
 }
@@ -293,7 +293,11 @@ ui <- fluidPage(
       width = 3,
       h4("Configuration"),
       
-      selectInput("dataset", "Dataset", choices = c("YAGO3_10")),
+      selectInput(
+        "dataset", 
+        "Dataset", 
+        choices = c("YAGO3_10", "WN18RR", "KINSHIPS", "FB15k237")
+      ),
       pickerInput(
         inputId = "model", 
         label = "Select Models to Compare", 
@@ -453,7 +457,7 @@ server <- function(input, output, session) {
     # Map over all selected models and combine results
     all_models_list <- map(input$model, function(m) {
       tryCatch({
-        res <- read_dataset_with_folds(as.character(input$dataset), m)
+        res <- read_dataset_with_folds(as.character("YAGO3_10"), m)
         # Add model name to the results for plotting
         res$results_matrix$model <- m
         res$best_position$model <- m
@@ -567,9 +571,9 @@ server <- function(input, output, session) {
     req(res_matrix())
     mat <- res_matrix()
     k_val <- input$k
-    mean_col <- paste0("log_", k_val, "_softmax_mean")
-    low_col  <- paste0("log_", k_val, "_softmax_ci_low")
-    high_col <- paste0("log_", k_val, "_softmax_ci_high")
+    mean_col <- paste0("orig_softmax_", k_val, "_mean")
+    low_col  <- paste0("orig_softmax_", k_val, "_ci_low")
+    high_col <- paste0("orig_softmax_", k_val, "_ci_high")
     
     ggplot(mat, aes(x = factor(fold), y = .data[[mean_col]], color = model)) +
       geom_point(position = position_dodge(width = 0.5), size = 3) +

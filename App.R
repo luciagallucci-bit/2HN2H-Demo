@@ -350,12 +350,12 @@ ui <- fluidPage(
                  br(),
                  fluidRow(
                    column(6, card(
-                     card_header("Standard & Brier Score (0-1 Scale)"), 
-                     card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height = 450)))
+                     card_header("Hits@k, MRR & Brier Score"), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height = 350)))
                    )),
                    column(6, card(
                      card_header(textOutput("logk_title")), 
-                     card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height = 450)))
+                     card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height = 350)))
                    ))
                  )
         ),
@@ -401,8 +401,8 @@ ui <- fluidPage(
                      card_header("Tuple-Level Variance Across Folds"), 
                      card_body(
                        fluidRow(
-                         column(6, plotOutput("tuple_ci_plot_logk", height = 250)),
-                         column(6, plotOutput("tuple_ci_plot_mrr", height = 250))
+                         column(6, plotOutput("tuple_ci_plot_logk", height = 350)),
+                         column(6, plotOutput("tuple_ci_plot_mrr", height = 350))
                        )
                      )
                    ))
@@ -602,7 +602,16 @@ server <- function(input, output, session) {
       select(head, relation, tail, mean_pos, mean_mrr, LogK_CI) %>%
       rename(`Mean Rank` = mean_pos, `Mean MRR` = mean_mrr, !!paste0("Log-", input$k, " CI") := LogK_CI)
     
-    datatable(stat, options = list(pageLength = 5, scrollX = TRUE))
+    datatable(
+  stat, 
+  options = list(
+    pageLength = 5,           # Default rows shown
+    lengthMenu = c(5, 10, 15), # Dropdown options
+    searching = FALSE,        # Disables the search bar
+    scrollX = TRUE            # Keeps your horizontal scroll
+  ),
+  rownames = FALSE
+)
   })
   
   # --- UI for selecting a triple ---
@@ -627,11 +636,12 @@ server <- function(input, output, session) {
         Hit_k = ifelse(entity_position <= k_val, 1, 0)
       ) %>%
       arrange(fold) %>%
-      select(fold, entity_position, MRR, Hit_k, k_1, k_3, k_10, k_20) %>%
+      select(fold, entity_position, k_1, k_3, k_10, k_20) %>%
       mutate(across(starts_with("k_"), ~round(.x, 4)))
     
-    datatable(triple_rows, options = list(pageLength = 5, scrollX = TRUE), 
-              colnames = c("Fold", "Rank", "MRR", paste0("Hits@", k_val), "Log-1", "Log-3", "Log-10", "Log-20"))
+    datatable(triple_rows, options = list(pageLength = 5, scrollX = TRUE,searching = FALSE, lengthMenu = list(c(5, 10), c("5", "10"))), 
+              colnames = c("Fold", "Rank","Log-1", "Log-3", "Log-10", "Log-20"),
+              rownames = FALSE)
   })
   
   # --- Tuple CI Plot 1: LOG-K SCORES ---
@@ -663,6 +673,7 @@ server <- function(input, output, session) {
       geom_point(size = 3) +
       geom_errorbar(aes(ymin = CI_Low, ymax = CI_High), width = 0.2, linewidth = 1) +
       scale_color_viridis_d(option = "plasma", end = 0.8) +
+      coord_cartesian(ylim = c(0, 14)) + 
       labs(title = "Top-K Log Scores", x = "k Value", y = "Log Score") +
       theme(legend.position = "none")
   })
@@ -827,7 +838,7 @@ server <- function(input, output, session) {
       scale_x_discrete(labels = mrr_labels) +
       labs(
         title    = "Rank Distribution vs MRR",
-        subtitle = paste0("Reference Fold = ", ref_fold, " | Ordered Best to Worst"),
+        subtitle = paste0("Reference Fold = ", ref_fold),
         x        = "Reference MRR (1.0 \u2192 0.0)",
         y        = "Rank (Inverted)"
       ) +

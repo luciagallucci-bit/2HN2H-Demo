@@ -13,5 +13,7 @@ rsconnect::deployApp(
      "train_YAGO3_10.txt"
    )
  )
+
+
 # 
 # rsconnect::showLogs(getwd())

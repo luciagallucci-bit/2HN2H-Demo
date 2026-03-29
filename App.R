@@ -188,25 +188,7 @@ read_dataset_with_folds <- function(dataset_name,
   # it you want to use Chebyshev inequality, Recall fr(|X_{i} - \mu| > \sigma \epsilon) <= 1/\epsilon^2
   # set 1/epsilon^2 = 0.05 and obtaint
   eps <- sqrt(1/0.05)
-  dati |> 
-    group_by(fold) |> 
-    summarise(
-      across(
-        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, sparse_softmax_1, sparse_softmax_3, sparse_softmax_10, sparse_softmax_20, 
-          orig_softmax_1, orig_softmax_3, orig_softmax_10, orig_softmax_20,
-          sparse_brier_1, sparse_brier_3, sparse_brier_10, sparse_brier_20, orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20),
-        list(
-          mean = ~mean(.x, na.rm = TRUE),
-          # Chebyshev Lower Bound (capped at 0 minimum)
-          ci_low = ~mean(.x, na.rm = TRUE) - 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
-          # Chebyshev Upper Bound (capped at 1 maximum)
-          ci_high = ~mean(.x, na.rm = TRUE) + 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
-        ),
-        .names = "{.col}_{.fn}" 
-      )
-    ) -> results_matrix
+
   k_range <- c(1, 3, 10, 20)
   best_position <- matrix(NA, nrow = nrow(dati), ncol = 13) # here we work more at a tuple level 
   best_position <- as.data.frame(best_position)
@@ -218,12 +200,12 @@ read_dataset_with_folds <- function(dataset_name,
   best_position$top_100_scores <- dati$top_100_scores
   best_position$top_100_entities <- dati$top_100_entities
   for (i in 1:nrow(best_position)) {
+    exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
     if (tails[i] %in% dati$top_100_entities[i][[1]]) {
       best_position[i,1] <- dati$hits[i]
       best_position[i, 8] <- 1/dati$hits[i]
       #best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
       best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
-      exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
       best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
         if (best_position[i,1] <= k) {
           -log(best_position[i, 2])
@@ -252,6 +234,47 @@ read_dataset_with_folds <- function(dataset_name,
     }
     
   }
+  dati |> 
+    group_by(fold) |> 
+    summarise(
+      across(
+        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          # Chebyshev Lower Bound (capped at 0 minimum)
+          ci_low = ~mean(.x, na.rm = TRUE) - 
+            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
+          # Chebyshev Upper Bound (capped at 1 maximum)
+          ci_high = ~mean(.x, na.rm = TRUE) + 
+            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
+        ),
+        .names = "{.col}_{.fn}" 
+      )
+    ) -> results_matrix
+  
+  best_position |> 
+    group_by(fold) |> 
+    summarise(
+      across(
+        c("k_1", "k_3", "k_10", "k_20"),
+        list(
+          mean = ~mean(.x, na.rm = TRUE),
+          # Chebyshev Lower Bound (capped at 0 minimum)
+          ci_low = ~mean(.x, na.rm = TRUE) - 
+            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
+          # Chebyshev Upper Bound (capped at 1 maximum)
+          ci_high = ~mean(.x, na.rm = TRUE) + 
+            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
+        ),
+        .names = "{.col}_{.fn}" 
+      )
+    ) -> results_matrix_bis
+
+  results_matrix <- results_matrix %>%
+    left_join(results_matrix_bis, by = "fold")
+  dati |>
+    select(orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20) -> dat_appoggio
+  best_position <- cbind(best_position, dat_appoggio)
 
   output <- list(results_matrix = results_matrix, best_position = best_position)
   return(output)
@@ -259,8 +282,8 @@ read_dataset_with_folds <- function(dataset_name,
 
 
 # ---------- UI ------------
+# ---------- UI ------------
 ui <- fluidPage(
-  
   theme = bs_theme(
     version = 5,
     bootswatch = "flatly",
@@ -274,27 +297,21 @@ ui <- fluidPage(
     tags$style(HTML("
       body { background-color: #F7F9FC; }
       .title-panel { background: linear-gradient(90deg,#1F4E79,#2E86C1); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
-      .card { border-radius: 10px; box-shadow: 0px 2px 10px rgba(0,0,0,0.05); }
+      .card { border-radius: 10px; box-shadow: 0px 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; }
       .control-label { font-weight: 600; }
     "))
   ),
   
   div(class="title-panel",
-      h2("To Hit or not to Hit"),
-      p("Interactive demo")
+      h2("To Hit or not to Hit: Knowledge Graph Completion Analysis"),
+      p("Comparison of Proper Scores and Standard Metrics")
   ),
   
   sidebarLayout(
-    
     sidebarPanel(
       width = 3,
       h4("Configuration"),
-      
-      selectInput(
-        "dataset", 
-        "Dataset", 
-        choices = c("YAGO3_10", "WN18RR", "KINSHIPS", "FB15k237")
-      ),
+      selectInput("dataset", "Dataset", choices = c("YAGO3_10", "WN18RR", "KINSHIPS", "FB15k237")),
       pickerInput(
         inputId = "model", 
         label = "Select Models to Compare", 
@@ -303,38 +320,17 @@ ui <- fluidPage(
         options = list(`actions-box` = TRUE), 
         multiple = TRUE
       ),
-      selectInput(
-        "model_single",
-        "Model for Detailed Analysis",
-        choices = c("RotatE", "HolE", "MurE", "ComplEx"),
-        selected = "MurE"
-      ),
-      selectInput("k", "Top-k value (for Hits & LogK)", choices = c("1", "3", "10", "20"), selected = "10"),
-      sliderInput("max_rank_filter",
-                  "Filter rank:",
-                  min  = 100,
-                  max  = 5000,
-                  value = 1000,
-                  step = 100),
+      selectInput("k", "Top-k value", choices = c("1", "3", "10", "20"), selected = "10"),
+      sliderInput("max_rank_filter", "Rank Filter (Cross-Fold):", min = 50, max = 1000, value = 500, step = 50),
       
       hr(),
       h5("Inspector Settings"),
+      selectInput("model_single", "Model for Detailed Analysis", choices = c("RotatE", "HolE", "MurE", "ComplEx"), selected = "MurE"),
       selectInput("triple_filter", "Filter Triples By Behavior", 
-                  choices = c("Medium (Rank near 50)", "Random (Mixed)", "Easy (Consistently High Rank)", "Hard (Consistently Low Rank)", "High Variance (Model Uncertain)")),
+                  choices = c("Medium (Rank near 50)", "Random (Mixed)", "Easy (Consistently High Rank)", "Hard (Consistently Low Rank)", "High Variance")),
       sliderInput("n_sample_triples", "Triples to inspect", min = 5, max = 80, value = 20),
-      numericInput("seed", "Random seed", value = 42),
       
       actionBttn("resample", "Fetch Triples", style = "gradient", color = "primary"),
-      br(),
-      
-      radioGroupButtons(
-        inputId = "view_mode",
-        label = "Evaluation View Mode",
-        choices = c("Per Fold", "Overall Average"),
-        selected = "Per Fold",
-        status = "primary",
-        justified = TRUE
-      ),
       br(),
       downloadButton("download_combined_csv", "Download Current View")
     ),
@@ -343,156 +339,102 @@ ui <- fluidPage(
       tabsetPanel(
         id = "tabs",
         
-        # ---------- Model Evaluation ----------
+        # ---------- Tab 1: Model Evaluation ----------
         tabPanel("Model Evaluation",
                  br(),
                  fluidRow(
-                   column(12, card(
-                     card_header("Hits@k & MRR Performance"), 
-                     card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height = 400)))
-                   ))
-                 ),
-                 br(),
-                 fluidRow(
                    column(6, card(
-                     card_header("Top-k Log Score"), 
-                     card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height = 350)))
+                     card_header("Hits@k, MRR & Brier Score"), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("unified_metrics_plot", height = 350)))
                    )),
                    column(6, card(
-                     card_header("Rank vs Top-k Log Score"), 
-                     card_body(shinycssloaders::withSpinner(plotOutput("position_vs_logk", height = 350)))
+                     card_header(textOutput("logk_title")), 
+                     card_body(shinycssloaders::withSpinner(plotOutput("logk_forest", height = 350)))
                    ))
                  )
         ),
         
-        # ---------- Cross-Fold Analysis ----------
+        # ---------- Tab 2: Cross-Fold Analysis (Lorenzo Plots) ----------
         tabPanel("Cross-Fold Analysis",
                  br(),
                  fluidRow(
-                   # Colonna Settings
-                   column(3,
+                   column(3, card(
+                     card_header("Settings"),
+                     card_body(
+                       selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
+                       selectInput("crossfold_metric", "Metric for Sorting", choices = c("Log-K" = "k", "Brier Score" = "brier"), selected = "k"),
+                       checkboxInput("random_fold", "Use random fold", value = FALSE)
+                     )
+                   )),
+                   column(9, 
                           card(
-                            card_header("Settings"),
-                            card_body(
-                              selectInput("ref_fold", "Reference Fold", choices = as.character(1:15), selected = "1"),
-                              selectInput("crossfold_metric",
-                                          "Metrics",
-                                          choices = c(
-                                            "Log Softmax (orig)"    = "orig_softmax",
-                                            "Log Sparse Softmax"    = "sparse_softmax",
-                                            "Brier Softmax (orig)"  = "orig_brier",
-                                            "Brier Sparse Softmax"  = "sparse_brier"
-                                          ),
-                                          selected = "orig_softmax"),
-                               checkboxInput("random_fold", "Use random fold", value = FALSE),
-                              helpText("Select a fold to compare its Log-K scores against 15 other folds.")
-                            )
-                          )
-                   ),
-                   # Colonna Plot
-                   column(9,
-                          fluidRow(
-                            
-                            # Cross-Fold Analysis tab
-                            column(12, card(
-                              card_header("Cross-Fold Log-K Consistency"),
-                              card_body(
-                                shinycssloaders::withSpinner(plotOutput("crossfold_logk", height = 400))
-                              )
-                            )),
-                            column(12, card(
-                              card_header("Cross-Fold MRR"),
-                              card_body(
-                                shinycssloaders::withSpinner(plotOutput("crossfold_mrr", height = 400))
-                              )
-                            ))
+                            card_header("Rank Distribution Stability"),
+                            card_body(shinycssloaders::withSpinner(plotOutput("crossfold_logk", height = 400)))
+                          ),
+                          card(
+                            card_header("Rank Distribution vs MRR"),
+                            card_body(shinycssloaders::withSpinner(plotOutput("crossfold_mrr", height = 400)))
                           )
                    )
                  )
         ),
         
-        # ---------- Triple Inspector ----------
+        # ---------- Tab 3: Triple Inspector ----------
         tabPanel("Triple Inspector",
                  br(),
-                 fluidRow(
-                   column(12, card(
-                     card_header("Sampled Triples Summary (with Tuple-Level Chebyshev CIs)"), 
-                     card_body(DTOutput("triples_table_summary"))
-                   ))
+                 card(
+                   card_header("Sampled Triples Summary"), 
+                   card_body(DTOutput("triples_table_summary"))
                  ),
                  fluidRow(
                    column(5, card(
-                     card_header("Prediction Details Across Folds"), 
-                     card_body(
-                       uiOutput("selected_triple_ui"), br(),
-                       DTOutput("triple_fold_table")
-                     )
+                     card_header("Prediction Details"), 
+                     card_body(uiOutput("selected_triple_ui"), DTOutput("triple_fold_table"))
                    )),
                    column(7, card(
                      card_header("Tuple-Level Variance Across Folds"), 
                      card_body(
                        fluidRow(
-                         column(6, plotOutput("tuple_ci_plot_logk", height = 250)),
-                         column(6, plotOutput("tuple_ci_plot_mrr", height = 250))
-                       ),
-                       br(),
-                       selectInput("fold_for_top100", "Fold for Top-100 Predictions", choices = as.character(1:15)),
-                       DTOutput("top100_table")
+                         column(6, plotOutput("tuple_ci_plot_logk", height = 350)),
+                         column(6, plotOutput("tuple_ci_plot_mrr", height = 350))
+                       )
                      )
                    ))
                  )
         )
-        
       )
     )
   )
 )
 # ---------- Server ------------
-
 server <- function(input, output, session) {
   
-  theme_set(
-    theme_minimal(base_size = 14) +
-      theme(
-        plot.title = element_text(face="bold", size=14),
-        axis.title = element_text(size=12),
-        panel.grid.minor = element_blank()
-      )
-  )
+  # Title for Log-K plot
+  output$logk_title <- renderText({ paste0("Mean Top-", input$k, " Log Score Comparison") })
   
   # Reactive Data Loading
-  # Inside server function:
   processed_data <- reactive({
     req(input$dataset, input$model)
-    
-    # Map over all selected models and combine results
     all_models_list <- map(input$model, function(m) {
       tryCatch({
-        res <- read_dataset_with_folds(as.character("YAGO3_10"), m)
-        # Add model name to the results for plotting
+        res <- read_dataset_with_folds(input$dataset, m)
         res$results_matrix$model <- m
         res$best_position$model <- m
         return(res)
-      }, error = function(e) {
-        showNotification(paste("Data not found for", m), type = "error")
-        return(NULL)
-      })
+      }, error = function(e) { return(NULL) })
     })
-    
-    # Remove NULLs
     all_models_list <- compact(all_models_list)
-    
     if(length(all_models_list) == 0) return(NULL)
     
-    # Combine results_matrix and best_position from all models
     list(
       results_matrix = bind_rows(map(all_models_list, "results_matrix")),
       best_position = bind_rows(map(all_models_list, "best_position"))
     )
   })
-  res_matrix <- reactive({ req(processed_data()); processed_data()$results_matrix })
+  
+  res_matrix <- reactive({ req(processed_data()$results_matrix) })
   best_pos   <- reactive({ req(processed_data()); processed_data()$best_position })
-
+  
   
   res_matrix_single <- reactive({
     req(res_matrix(), input$model_single)
@@ -509,122 +451,88 @@ server <- function(input, output, session) {
       semi_join(sampled_triples(), by = c("head", "relation", "tail"))
   })
   
-  # --- Unified Forest Plot: Hits@k and MRR ---
+  
+  # --- Hits & MRR Plot ---
   output$unified_metrics_plot <- renderPlot({
     req(res_matrix())
-    mat <- res_matrix()
+    df <- res_matrix()
     k_val <- input$k
-    hits_mean_col <- paste0("hits@", k_val, "_mean")
-    hits_low_col  <- paste0("hits@", k_val, "_ci_low")
-    hits_high_col <- paste0("hits@", k_val, "_ci_high")
     
-    if (input$view_mode == "Per Fold") {
-      plot_data <- mat %>%
-        pivot_longer(
-          cols = c(all_of(hits_mean_col), mrr_mean),
-          names_to = "metric",
-          values_to = "mean"
-        ) %>%
-        mutate(
-          # Match CI columns to the specific metric
-          ci_low = ifelse(metric == "mrr_mean", mrr_ci_low, .data[[hits_low_col]]),
-          ci_high = ifelse(metric == "mrr_mean", mrr_ci_high, .data[[hits_high_col]]),
-          metric = ifelse(metric == "mrr_mean", "MRR", paste0("Hits@", k_val))
+    # 1. Definizione stringhe nomi colonne (devono essere stringhe per il confronto)
+    hits_mean_str  <- paste0("hits@", k_val, "_mean")
+    hits_low_col   <- paste0("hits@", k_val, "_ci_low")
+    hits_high_col  <- paste0("hits@", k_val, "_ci_high")
+    
+    brier_mean_str <- paste0("orig_brier_", k_val, "_mean")
+    brier_low_col  <- paste0("orig_brier_", k_val, "_ci_low")
+    brier_high_col <- paste0("orig_brier_", k_val, "_ci_high")
+    
+    # 2. Pivot e Mutate
+    plot_data <- df %>%
+      pivot_longer(
+        cols = c(all_of(hits_mean_str), mrr_mean, all_of(brier_mean_str)),
+        names_to = "metric_type",
+        values_to = "mean_val"
+      ) %>%
+      mutate(
+        # Corretto: mettiamo i nomi delle metriche tra virgolette per il confronto
+        ci_low = case_when(
+          metric_type == "mrr_mean"       ~ mrr_ci_low,
+          metric_type == hits_mean_str    ~ .data[[hits_low_col]],
+          metric_type == brier_mean_str   ~ .data[[brier_low_col]],
+          TRUE ~ NA_real_
+        ),
+        ci_high = case_when(
+          metric_type == "mrr_mean"       ~ mrr_ci_high,
+          metric_type == hits_mean_str    ~ .data[[hits_high_col]],
+          metric_type == brier_mean_str   ~ .data[[brier_high_col]],
+          TRUE ~ NA_real_
+        ),
+        # Label pulite per la legenda
+        metric_label = case_when(
+          metric_type == "mrr_mean"       ~ "MRR",
+          metric_type == hits_mean_str    ~ paste0("Hits@", k_val),
+          metric_type == brier_mean_str   ~ "Brier Score",
+          TRUE ~ metric_type
         )
-      
-      ggplot(plot_data, aes(x = factor(fold), y = mean, color = model, shape = metric)) +
-        geom_point(position = position_dodge(width = 0.7), size = 3) +
-        geom_errorbar(aes(ymin = ci_low, ymax = ci_high), 
-                      position = position_dodge(width = 0.7), width = 0.3) +
-        labs(title = "Model Comparison: Hits & MRR", x = "Fold", y = "Score") +
-        theme(legend.position = "bottom")
-      
-    } else {
-      # Overall Average logic (Group by model)
-      overall_data <- mat %>%
-        group_by(model) %>%
-        summarise(
-          h_mean = mean(.data[[hits_mean_col]], na.rm=T),
-          h_sd = sd(.data[[hits_mean_col]], na.rm=T),
-          m_mean = mean(mrr_mean, na.rm=T),
-          m_sd = sd(mrr_mean, na.rm=T),
-          n = n()
-        )
-      # Overall Chebyshev Bounds across folds
-      n_folds <- nrow(mat)
-      eps <- sqrt(1/0.05)
-      
-      hits_mean <- mean(mat[[hits_mean_col]], na.rm=TRUE)
-      hits_sd <- sd(mat[[hits_mean_col]], na.rm=TRUE)
-      hits_ci_low <- max(0, hits_mean - eps * (hits_sd / sqrt(n_folds)))
-      hits_ci_high <- min(1, hits_mean + eps * (hits_sd / sqrt(n_folds)))
-      
-      mrr_mean <- mean(mat$mrr_mean, na.rm=TRUE)
-      mrr_sd <- sd(mat$mrr_mean, na.rm=TRUE)
-      mrr_ci_low <- max(0, mrr_mean - eps * (mrr_sd / sqrt(n_folds)))
-      mrr_ci_high <- min(1, mrr_mean + eps * (mrr_sd / sqrt(n_folds)))
-      
-      plot_data <- data.frame(
-        metric = factor(c(paste0("Hits@", k_val), "MRR"), levels = c(paste0("Hits@", k_val), "MRR")),
-        mean = c(hits_mean, mrr_mean),
-        ci_low = c(hits_ci_low, mrr_ci_low),
-        ci_high = c(hits_ci_high, mrr_ci_high)
       )
-      
-      ggplot(plot_data, aes(x = metric, y = mean, color = metric)) +
-        geom_point(size = 5) +
-        geom_errorbar(aes(ymin = ci_low, ymax = ci_high), width = 0.15, linewidth = 1) +
-        ylim(0, 1) +
-        scale_color_manual(values = c("#1F4E79", "#27AE60")) +
-        labs(title = paste0("Overall Mean: Hits@", k_val, " & MRR (Across 15 Folds)"), 
-             subtitle = "Error bars indicate 95% Chebyshev CI",
-             x = "Metric", y = "Score") +
-        theme(legend.position = "none")
-    }
-  })
-  
-  # --- Forest Plot: LogK ---
-  output$logk_forest <- renderPlot({
-    req(res_matrix())
-    mat <- res_matrix()
-    k_val <- input$k
-    mean_col <- paste0("orig_softmax_", k_val, "_mean")
-    low_col  <- paste0("orig_softmax_", k_val, "_ci_low")
-    high_col <- paste0("orig_softmax_", k_val, "_ci_high")
     
-    ggplot(mat, aes(x = factor(fold), y = .data[[mean_col]], color = model)) +
-      geom_point(position = position_dodge(width = 0.5), size = 3) +
-      geom_errorbar(aes(ymin = .data[[low_col]], ymax = .data[[high_col]]), 
-                    position = position_dodge(width = 0.5), width = 0.4) +
-      labs(title = paste0("Mean top-", k_val, " Log Score Comparison"), 
-           x = "Fold", y = "Log Score") +
+    # 3. Plot
+    ggplot(plot_data, aes(x = factor(fold), y = mean_val, color = model, shape = metric_label)) +
+      geom_point(position = position_dodge(width = 0.8), size = 3.5) +
+      geom_errorbar(aes(ymin = ci_low, ymax = ci_high), 
+                    position = position_dodge(width = 0.8), width = 0.4, alpha = 0.6) +
+      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+      labs(
+        title = "Accuracy & Calibration Comparison",
+        subtitle = paste0("Metrics evaluated at k = ", k_val),
+        x = "Fold", 
+        y = "Value (0-1 Scale)", 
+        color = "Model", 
+        shape = "Metric"
+      ) +
+      theme_minimal() +
       theme(legend.position = "bottom")
   })
   
-  # --- Position vs LogK Score ---
-  output$position_vs_logk <- renderPlot({
-    req(best_pos(), input$k, input$max_rank_filter)   
-    bp    <- best_pos()
-    k_col <- paste0("k_", input$k)
+  # --- Log-K Plot ---
+  output$logk_forest <- renderPlot({
+    req(res_matrix())
+    k_val <- input$k
     
-    stat <- bp %>%
-      group_by(head, relation, tail) %>%
-      summarise(
-        mean_position = mean(entity_position, na.rm = TRUE),
-        mean_logk     = mean(.data[[k_col]], na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      filter(mean_position <= input$max_rank_filter)   # <-- unica riga aggiunta
+    # Column naming logic from your read_dataset function
+    mean_col <- paste0("k_", k_val, "_mean")
+    low_col  <- paste0("k_", k_val, "_ci_low")
+    high_col <- paste0("k_", k_val, "_ci_high")
     
-    ggplot(stat, aes(x = mean_position, y = mean_logk)) +
-      geom_jitter(alpha = 0.4, height = 0, width = 0.6, color = "#8E44AD") +
-      labs(
-        title    = paste0("Mean rank vs Mean Top-", input$k, " Log Score"),
-        subtitle = paste0("Showing triples with mean rank ≤ ", input$max_rank_filter),
-        x = "Mean Rank",
-        y = paste0("Mean Top-", input$k, " Log Score")
-      )
-  })  
+    ggplot(res_matrix(), aes(x = factor(fold), y = .data[[mean_col]], color = model)) +
+      geom_point(position = position_dodge(width = 0.5), size = 3) +
+      geom_errorbar(aes(ymin = .data[[low_col]], ymax = .data[[high_col]]), 
+                    position = position_dodge(width = 0.5), width = 0.4) +
+      labs(x = "Fold", y = "Log Score (Proper Score)", color = "Model") +
+      theme_minimal() +
+      theme(legend.position = "bottom")
+  })
   # --- Resampling Filtered Triples ---
   sampled_triples <- eventReactive(input$resample, {
     req(best_pos_single())
@@ -688,7 +596,16 @@ server <- function(input, output, session) {
       select(head, relation, tail, mean_pos, mean_mrr, LogK_CI) %>%
       rename(`Mean Rank` = mean_pos, `Mean MRR` = mean_mrr, !!paste0("Log-", input$k, " CI") := LogK_CI)
     
-    datatable(stat, options = list(pageLength = 5, scrollX = TRUE))
+    datatable(
+  stat, 
+  options = list(
+    pageLength = 5,           # Default rows shown
+    lengthMenu = c(5, 10, 15), # Dropdown options
+    searching = FALSE,        # Disables the search bar
+    scrollX = TRUE            # Keeps your horizontal scroll
+  ),
+  rownames = FALSE
+)
   })
   
   # --- UI for selecting a triple ---
@@ -713,11 +630,12 @@ server <- function(input, output, session) {
         Hit_k = ifelse(entity_position <= k_val, 1, 0)
       ) %>%
       arrange(fold) %>%
-      select(fold, entity_position, MRR, Hit_k, k_1, k_3, k_10, k_20) %>%
+      select(fold, entity_position, k_1, k_3, k_10, k_20) %>%
       mutate(across(starts_with("k_"), ~round(.x, 4)))
     
-    datatable(triple_rows, options = list(pageLength = 5, scrollX = TRUE), 
-              colnames = c("Fold", "Rank", "MRR", paste0("Hits@", k_val), "Log-1", "Log-3", "Log-10", "Log-20"))
+    datatable(triple_rows, options = list(pageLength = 5, scrollX = TRUE,searching = FALSE, lengthMenu = list(c(5, 10), c("5", "10"))), 
+              colnames = c("Fold", "Rank","Log-1", "Log-3", "Log-10", "Log-20"),
+              rownames = FALSE)
   })
   
   # --- Tuple CI Plot 1: LOG-K SCORES ---
@@ -749,6 +667,7 @@ server <- function(input, output, session) {
       geom_point(size = 3) +
       geom_errorbar(aes(ymin = CI_Low, ymax = CI_High), width = 0.2, linewidth = 1) +
       scale_color_viridis_d(option = "plasma", end = 0.8) +
+      coord_cartesian(ylim = c(0, 14)) + 
       labs(title = "Top-K Log Scores", x = "k Value", y = "Log Score") +
       theme(legend.position = "none")
   })
@@ -836,76 +755,94 @@ server <- function(input, output, session) {
     paste0(input$crossfold_metric, "_", input$k)
   })
   
-  
   output$crossfold_logk <- renderPlot({
-    req(bp_sampled_reactive(), input$k)
-    k_col    <- paste0("k_", input$k)
-    ref_fold <- ref_fold_selected()
-    bp_s     <- bp_sampled_reactive()
+    req(bp_sampled_reactive(), input$max_rank_filter, input$k)
     
-    ref_data <- bp_s %>%
-      filter(fold == ref_fold) %>%
-      select(head, relation, tail, ref_logk = .data[[k_col]])
+    bp_s <- bp_sampled_reactive() 
+    ref_f <- ref_fold_selected()
     
-    merged <- bp_s %>%
+    # Mapping metrica
+    k_col <- case_when(
+      input$crossfold_metric == "k"     ~ paste0("k_", input$k),
+      input$crossfold_metric == "brier" ~ paste0("orig_brier_", input$k),
+      TRUE ~ paste0("k_", input$k)
+    )
+    
+    # 1. Pulizia dati: Se il Brier è > 1, lo normalizziamo (es. dividendo per N entità)
+    # O semplicemente lo segnaliamo. Qui forziamo il valore nel range 0-1 se è Brier.
+    ref_data <- bp_s %>% 
+      filter(fold == ref_f) %>%
+      select(head, relation, tail, ref_score = .data[[k_col]]) %>%
+      mutate(ref_score = if(input$crossfold_metric == "brier" && any(ref_score > 1)) 
+        ref_score / max(ref_score, na.rm=TRUE) else ref_score) %>%
+      arrange(ref_score)
+    
+    # 2. Creazione del plot con asse X ordinato
+    merged <- bp_s %>% 
       inner_join(ref_data, by = c("head", "relation", "tail")) %>%
-      inner_join(
-        ref_data %>% arrange(ref_logk) %>% mutate(idx = row_number()) %>%
-          select(head, relation, tail, idx),
-        by = c("head", "relation", "tail")
-      )
+      mutate(ref_score_label = factor(round(ref_score, 4), 
+                                      levels = unique(round(ref_data$ref_score, 4))))
     
-    labels_x <- merged %>%
-      distinct(idx, ref_logk) %>% arrange(idx) %>%
-      pull(ref_logk) %>% round(2)
-    
-    ggplot(merged, aes(x = factor(idx), y = entity_position)) +
-      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#2E86C1", alpha = 0.6) +
-      scale_y_reverse() +
-      scale_x_discrete(labels = labels_x) +
-      labs(title    = paste0("Rank Distribution vs Log-", input$k),
-           subtitle = paste0("Reference Fold = ", ref_fold),
-           x        = paste0("Log-", input$k, " (Reference Fold)"),
-           y        = "Rank") +
-      theme_minimal() +
-      theme(axis.text.x = element_text(angle = 45, hjust = 1),
-            legend.position = "none")
+    ggplot(merged, aes(x = ref_score_label, y = entity_position)) +
+      geom_boxplot(
+        fill = ifelse(input$crossfold_metric == "brier", "#E67E22", "#2E86C1"), 
+        alpha = 0.5, outlier.size = 1
+      ) +
+      scale_y_reverse(limits = c(input$max_rank_filter, 1)) +
+      labs(
+        title = paste0("Rank vs ", input$crossfold_metric),
+        x = "Value ",
+        y = "Rank"
+      ) +
+      theme_minimal() + 
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, size = 8))
   })
   
   
   # -- Lorenzo plot: scatter cross-fold --
   outputOptions(output, "crossfold_logk", suspendWhenHidden = TRUE)
-  
+
   # -- MRR plot --
   output$crossfold_mrr <- renderPlot({
-    req(bp_sampled_reactive())
+    req(bp_sampled_reactive(), input$max_rank_filter)
     ref_fold <- ref_fold_selected()
     bp_s     <- bp_sampled_reactive()
     
+    # 1. Prepare reference data 
+    # Sort MRR from highest (1.0) to lowest (e.g., 0.001) using desc()
     ref_data <- bp_s %>%
       filter(fold == ref_fold) %>%
       mutate(ref_mrr = 1 / entity_position) %>%
-      select(head, relation, tail, ref_mrr)
+      select(head, relation, tail, ref_mrr) %>%
+      arrange(desc(ref_mrr)) %>%  # <-- AGGIUNTO desc() QUI
+      mutate(idx = row_number()) # Assigns X-axis order based on the sort
     
+    # Mappiamo l'indice al valore MRR arrotondato
+    mrr_labels <- setNames(sprintf("%.3f", ref_data$ref_mrr), ref_data$idx)
+    
+    # 2. Merge back to the sampled data to get distributions across all folds
     merged <- bp_s %>%
-      inner_join(ref_data, by = c("head", "relation", "tail")) %>%
-      inner_join(
-        ref_data %>% arrange(ref_mrr) %>% mutate(idx = row_number()) %>%
-          select(head, relation, tail, idx),
-        by = c("head", "relation", "tail")
-      )
+      inner_join(ref_data, by = c("head", "relation", "tail"))
     
+    # 3. Plot with standard Reverse Scale
     ggplot(merged, aes(x = factor(idx), y = entity_position)) +
-      geom_boxplot(width = 0.2, outlier.size = 1, fill = "#27AE60", alpha = 0.6) +
-      scale_y_reverse() +
-      labs(title    = "Rank Distribution vs MRR",
-           subtitle = paste0("Reference Fold = ", ref_fold),
-           x        = "Triples ordered by MRR",
-           y        = "Rank") +
+      geom_boxplot(width = 0.5, outlier.size = 1, fill = "#27AE60", alpha = 0.6) +
+      scale_y_reverse(limits = c(input$max_rank_filter, 1)) +
+      # Applichiamo le etichette reali dell'MRR
+      scale_x_discrete(labels = mrr_labels) +
+      labs(
+        title    = "Rank Distribution vs MRR",
+        subtitle = paste0("Reference Fold = ", ref_fold),
+        x        = "Reference MRR (1.0 \u2192 0.0)",
+        y        = "Rank (Inverted)"
+      ) +
       theme_minimal() +
-      theme(axis.text.x  = element_blank(),
-            axis.ticks.x = element_blank(),
-            legend.position = "none")
+      theme(
+        axis.text.x      = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 9),
+        axis.ticks.x     = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position  = "none"
+      )
   })
 }
 

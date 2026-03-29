@@ -150,7 +150,7 @@ If you use this demo or the methodology in your work, please cite:
 
 ``` bibtex
 @misc{2HN2H2026,
-  title  = {To Hit or not to Hit: Computing accuracy of Knowledge Graph Completion Tasks with Proper Scores},
+  title  = {To Hit or not to Hit: Evaluating Predictive Performance on Knowledge Graph Completion Tasks with Proper Scores},
   author = {Gian Mario Sangiovanni, Lucia Gallucci, Lorenzo Balzotti, Donatella Firmani, Giovanna Jona Lasinio, Johannes Resin},
   year   = {2026}
 }

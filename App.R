@@ -1,15 +1,9 @@
+
 # To Hit or Not To Hit: A Demo
 
 # Authors:
-# Marco Lattanzio
-# Johannes Resin
-# Donatella Firmani
-# Lorenzo Balzotti 
-# Gian Mario Sangiovanni,
-# Lucia Gallucci
-# Giovanna Jona Lasinio
+# Gian Mario Sangiovanni, Lucia Gallucci, Lorenzo Balzotti, Donatella Firmani, Giovanna Jona Lasinio, Johannes Resin
 
-# Brief Description: bla bla bla 
 
 # install.packages(c("bslib","shinyWidgets"))
 # install.packages("shinycssloaders")

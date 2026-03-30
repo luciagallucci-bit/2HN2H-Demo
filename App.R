@@ -498,16 +498,23 @@ server <- function(input, output, session) {
       )
     
     # 3. Plot
+    y_max_data <- max(plot_data$ci_high, plot_data$mean_val, na.rm = TRUE)
+    
+    y_upper <- max(1, ceiling(y_max_data * 10) / 10)  # arrotonda a 0.1 sopra
+    
     ggplot(plot_data, aes(x = factor(fold), y = mean_val, color = model, shape = metric_label)) +
       geom_point(position = position_dodge(width = 0.8), size = 3.5) +
       geom_errorbar(aes(ymin = ci_low, ymax = ci_high), 
                     position = position_dodge(width = 0.8), width = 0.4, alpha = 0.6) +
-      scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.1)) +
+      scale_y_continuous(
+        limits = c(0, y_upper),
+        breaks = seq(0, y_upper, 0.1)
+      ) +
       labs(
         title = "Accuracy & Calibration Comparison",
         subtitle = paste0("Metrics evaluated at k = ", k_val),
         x = "Fold", 
-        y = "Value (0-1 Scale)", 
+        y = "Value", 
         color = "Model", 
         shape = "Metric"
       ) +

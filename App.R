@@ -106,182 +106,338 @@ hits_color <- "#2E86C1"
 log_color  <- "#1F4E79"
 accent     <- "#5DADE2"
 
-# Utility functions ------------------------------------------------------------
+# Settings ---------------------------------------------------------------------
 
-softmax_from_logits <- function(logits) { # sum_exp trick to avoid numerical problems
-  ex <- exp(logits - max(logits))
-  ex / sum(ex)
+K_RANGE          <- c(1, 3, 10, 20)            # top-k values used in the whole app
+CHEB_EPS         <- sqrt(1 / 0.05)             # Chebyshev: P(|X - mu| >= eps * sd) <= 1 / eps^2 = 0.05
+BUILTIN_DATASETS <- c("YAGO3_10", "WN18RR", "KINSHIPS", "FB15k237")
+BUILTIN_MODELS   <- c("RotatE", "HolE", "MurE", "ComplEx")
+USER_DATASET     <- "Your data"                # entry of the Dataset menu for the uploaded data
+BYOD_MIN_OVERLAP <- 0.9                        # min share of test triples present in every (model, fold) table
+BYOD_EXAMPLE     <- "example_YAGO3_10.zip"     # example files offered in the BYOD tab (if the file is in the app folder)
+options(shiny.maxRequestSize = 300 * 1024^2)   # uploads up to 300 MB (Shiny's default is 5 MB)
+
+# Metrics ----------------------------------------------------------------------
+
+# Probabilistic top-k scores.
+# The predictive distribution of a model over the |E| candidate tails is the softmax
+# of its scores: p(e) = exp(s(h, r, e)) / sum_exp. Its top-k version keeps the k most
+# likely entities and spreads the remaining mass 1 - M_k uniformly over the other
+# |E| - k entities, so that the true tail t gets
+#   q(t) = p(t)                     if rank(t) <= k
+#   q(t) = (1 - M_k) / (|E| - k)    otherwise
+# Top-k log score:   -log q(t)
+# Top-k Brier score: sum_e (q(e) - 1{e = t})^2
+# Inputs (one value per test triple): rank, score_true, log_z = log(sum_exp);
+# top = matrix of the highest scores, one row per triple, in decreasing order.
+compute_topk_scores <- function(rank, score_true, log_z, top, n_entities, k_range = K_RANGE) {
+  p_top  <- exp(top[, seq_len(max(k_range)), drop = FALSE] - log_z)  # probabilities of the top entities
+  p_true <- exp(score_true - log_z)                                   # probability of the true tail
+  out <- tibble(softmax_score = p_true)
+  for (k in k_range) {
+    m_k  <- rowSums(p_top[, seq_len(k), drop = FALSE])                # mass of the top-k list
+    rest <- pmax(1 - m_k, 0) / (n_entities - k)                       # probability of each entity outside the list
+    q_t  <- ifelse(rank <= k, p_true, rest)                           # probability of the true tail
+    out[[paste0("k_", k)]]          <- -log(pmax(q_t, 1e-300))
+    out[[paste0("orig_brier_", k)]] <- rowSums(p_top[, seq_len(k), drop = FALSE]^2) +
+                                       (n_entities - k) * rest^2 - 2 * q_t + 1
+  }
+  out
 }
 
-# compute top-k log score using saved per-triple metadata:
-# - softmax_true: numeric scalar = exp(score_true) / sum_exp_all
-# - sum_exp_all: scalar sum(exp(all_logits))
-# - top100_cumexp: numeric vector length 100 with cumulative sums of exp(scores_sorted)[1:k]
-# - position: integer rank (1 = best)
+# Mean and Chebyshev interval of every metric over the test triples of each fold
+summarise_by_fold <- function(per_triple, eps = CHEB_EPS) {
+  for (k in K_RANGE) per_triple[[paste0("hits@", k)]] <- as.numeric(per_triple$entity_position <= k)
+  metrics <- c(paste0("hits@", K_RANGE), "mrr", paste0("orig_brier_", K_RANGE), paste0("k_", K_RANGE))
+  per_triple %>%
+    group_by(fold) %>%
+    summarise(
+      across(
+        all_of(metrics),
+        list(
+          mean    = ~mean(.x, na.rm = TRUE),
+          ci_low  = ~mean(.x, na.rm = TRUE) - eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
+          ci_high = ~mean(.x, na.rm = TRUE) + eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
+        ),
+        .names = "{.col}_{.fn}"
+      ),
+      .groups = "drop"
+    )
+}
 
-compute_logk_from_meta <- function(position, softmax_true, sum_exp_all, top100_cumexp, n_entities, k) {
+fmt_int <- function(x) formatC(x, format = "d", big.mark = ",")
   
-  if (k >= n_entities) { # this is just a check
-    # if k covers all entities, the probabilistic top-k equals the model's distribution => -log(softmax_true)
-    return(-log(max(softmax_true, 1e-300)))
+# Built-in datasets ------------------------------------------------------------
+
+# combined_<dataset>_<model>.parquet: one row per (fold, test triple), from our pipeline.
+# Hits@k and MRR come from the rank (column `hits`). The Top-k log and Brier scores are the
+# pipeline's columns log_k_softmax and orig_brier_k, computed with the number of entities |E|
+# of each fold; for uploaded data compute_topk_scores() gives the same values.
+read_dataset_with_folds <- function(dataset_name, model_name) {
+  file_path <- paste0("combined_", dataset_name, "_", model_name, ".parquet")
+  cols <- c("fold", "head", "relation", "tail", "hits", "softmax",
+            paste0("log_", K_RANGE, "_softmax"), paste0("orig_brier_", K_RANGE))
+  dati <- read_parquet(file_path, col_select = all_of(cols))
+  best_position <- tibble(
+    entity_position = dati$hits,              # rank of the true tail (1 = best)
+    softmax_score   = dati$softmax,           # model probability of the true tail
+    fold            = dati$fold,
+    mrr             = 1 / dati$hits,
+    head            = as.character(dati$head),
+    relation        = as.character(dati$relation),
+    tail            = as.character(dati$tail)
+  )
+  for (k in K_RANGE) {
+    best_position[[paste0("k_", k)]]          <- dati[[paste0("log_", k, "_softmax")]]
+    best_position[[paste0("orig_brier_", k)]] <- dati[[paste0("orig_brier_", k)]]
+  }
+  list(results_matrix = summarise_by_fold(best_position), best_position = best_position)
+}
+
+# Built-in results are read once and kept in memory (shared by all the sessions)
+builtin_cache <- new.env(parent = emptyenv())
+load_builtin <- function(dataset_name, model_name) {
+  key <- paste(dataset_name, model_name, sep = "/")
+  if (is.null(builtin_cache[[key]])) builtin_cache[[key]] <- read_dataset_with_folds(dataset_name, model_name)
+  builtin_cache[[key]]
+}
+
+# Bring Your Own Data ----------------------------------------------------------
+
+# Columns of the uploaded tables (matched by name, in any order; other columns are ignored)
+BYOD_SPEC <- data.frame(
+  column  = c("head", "relation", "tail", "rank", "score_true", "sum_exp", "top_scores"),
+  type    = c("text", "text", "text", "integer\u00A0\u2265\u00A01", "number", "number\u00A0>\u00A00", "list of numbers"),
+  content = c("head entity h",
+              "relation r",
+              "true tail entity t",
+              "rank of t among all the candidate tails (1 = best)",
+              "score s(h, r, t) of the true tail",
+              "\u03A3 exp s(h, r, e) over all the entities e, i.e. the softmax normaliser (or log_sum_exp, its logarithm)",
+              paste0("the highest scores s(h, r, e), in decreasing order: at least ", max(K_RANGE), " values (extra values are ignored)"))
+)
+BYOD_N_TOP   <- max(K_RANGE)   # top scores needed by the metrics
+BYOD_ALIASES <- c(hits = "rank", score_right = "score_true", top_100_scores = "top_scores")  # names in our own files
+BYOD_STATUS  <- list(ok = c("\u2714", "#1E8449"), warn = c("\u26A0", "#B9770E"), error = c("\u2716", "#C0392B"))
+
+byod_spec_table <- function() {
+  tags$table(
+    class = "table table-sm",
+    tags$thead(tags$tr(tags$th("Column"), tags$th("Type"), tags$th("Content"))),
+    tags$tbody(lapply(seq_len(nrow(BYOD_SPEC)), function(i)
+      tags$tr(tags$td(tags$code(BYOD_SPEC$column[i])), tags$td(BYOD_SPEC$type[i]), tags$td(BYOD_SPEC$content[i]))))
+  )
+}
+
+# "RotatE_fold3.csv" -> model "RotatE", fold 3;  "RotatE.csv" -> model "RotatE", fold from the column `fold`
+byod_parse_name <- function(file_name) {
+  stem  <- tools::file_path_sans_ext(basename(file_name))
+  parts <- regmatches(stem, regexec("^(.+?)[_. -]*fold[_. -]*([0-9]+)$", stem, ignore.case = TRUE))[[1]]
+  if (length(parts) == 3) list(model = parts[2], fold = as.integer(parts[3]))
+  else list(model = stem, fold = NA_integer_)
+}
+
+byod_read_table <- function(path, file_name) {
+  ext <- tolower(tools::file_ext(file_name))
+  if (ext == "parquet") return(as.data.frame(read_parquet(path)))
+  if (ext == "csv") return(utils::read.csv(path, colClasses = "character", check.names = FALSE,
+                                           na.strings = character(0), strip.white = TRUE,
+                                           fileEncoding = "UTF-8-BOM"))   # also CSV saved by Excel
+  stop("unsupported file type '.", ext, "': use .parquet or .csv")
+}
+
+as_num <- function(x) suppressWarnings(as.numeric(x))
+
+# top_scores: list column (Parquet) or strings "1.2;0.8;..." (CSV; "[1.2, 0.8, ...]" works too)
+byod_parse_scores <- function(x) {
+  if (is.list(x)) return(lapply(x, as_num))
+  x <- gsub("^\\s*\\[|\\]\\s*$", "", as.character(x))
+  lapply(strsplit(x, "[;,[:space:]]+"), function(v) as_num(v[nzchar(v)]))
+}
+
+fmt_folds <- function(f) {
+  f <- sort(unique(f))
+  if (length(f) > 2 && all(diff(f) == 1)) paste0(f[1], "\u2013", f[length(f)]) else paste(f, collapse = ", ")
+}
+
+byod_file_error <- function(file_name, msg, model = "") {
+  list(file = file_name, model = model, folds = "", data = NULL, top = NULL,
+       errors = msg, warnings = character(0), notes = character(0))
+}
+
+# Reads and checks one uploaded table. Returns file, model, folds, messages (errors,
+# warnings, notes) and, when there are no errors, the data needed by the metrics.
+byod_read_file <- function(path, file_name) {
+  info <- byod_parse_name(file_name)
+  res  <- byod_file_error(file_name, character(0), info$model)
+  fail <- function(msg) { res$errors <- msg; res }
+
+  if (!nzchar(info$model)) return(fail("cannot read the model name from the file name (expected <model>_fold<f>)"))
+  d <- tryCatch(byod_read_table(path, file_name), error = function(e) e)
+  if (inherits(d, "error")) return(fail(paste("cannot read the file:", conditionMessage(d))))
+  if (nrow(d) == 0) return(fail("the table is empty"))
+  if (ncol(d) == 1 && grepl(";", names(d)))
+    return(fail("only one column found: the file seems to use ';' as separator, use ',' (standard CSV)"))
+
+  # column names: case-insensitive, plus the names used in our own files
+  names(d) <- tolower(trimws(names(d)))
+  for (a in names(BYOD_ALIASES))
+    if (a %in% names(d) && !(BYOD_ALIASES[[a]] %in% names(d))) names(d)[names(d) == a] <- BYOD_ALIASES[[a]]
+
+  need    <- c("head", "relation", "tail", "rank", "score_true", "top_scores", if (is.na(info$fold)) "fold")
+  missing <- setdiff(need, names(d))
+  if (!any(c("sum_exp", "log_sum_exp") %in% names(d))) missing <- c(missing, "sum_exp")
+  if (length(missing))
+    return(fail(paste0("missing column(s): ", paste(missing, collapse = ", "),
+                       if ("fold" %in% missing) " (or name the file <model>_fold<f>)")))
+  extra <- setdiff(names(d), c(need, "sum_exp", "log_sum_exp", "fold"))
+  if (length(extra)) res$notes <- sprintf("%d extra column(s) ignored", length(extra))
+
+  # types and values
+  ent <- lapply(d[c("head", "relation", "tail")], function(v) trimws(as.character(v)))
+  if (any(vapply(ent, function(v) any(is.na(v) | v == ""), logical(1))))
+    return(fail("head, relation and tail cannot be empty"))
+  rank <- as_num(d$rank)
+  if (anyNA(rank) || any(rank < 1 | rank != round(rank))) return(fail("rank must contain integers \u2265 1"))
+  score <- as_num(d$score_true)
+  if (!all(is.finite(score))) return(fail("score_true must contain numbers"))
+  log_z <- if ("log_sum_exp" %in% names(d)) as_num(d$log_sum_exp) else suppressWarnings(log(as_num(d$sum_exp)))
+  if (!all(is.finite(log_z))) return(fail("sum_exp must contain positive numbers (log_sum_exp: finite numbers)"))
+  fold <- if (is.na(info$fold)) as_num(d$fold) else rep(info$fold, nrow(d))
+  if (anyNA(fold) || any(fold != round(fold))) return(fail("fold must contain integers"))
+
+  # top scores: at least BYOD_N_TOP numbers per row, in decreasing order
+  top_list <- byod_parse_scores(d$top_scores)
+  short    <- lengths(top_list) < BYOD_N_TOP
+  if (any(short))
+    return(fail(sprintf("top_scores needs at least %d values per row (%d rows have fewer)", BYOD_N_TOP, sum(short))))
+  top <- matrix(unlist(lapply(top_list, `[`, seq_len(BYOD_N_TOP))), ncol = BYOD_N_TOP, byrow = TRUE)
+  if (!all(is.finite(top))) return(fail("top_scores must contain numbers"))
+  if (any(top[, -1] > top[, -BYOD_N_TOP] + 1e-9))
+    return(fail("top_scores must be sorted in decreasing order (if your model outputs distances, use score = -distance)"))
+
+  # probabilities cannot exceed 1: sum_exp must be the sum over all the entities
+  if (any(exp(score - log_z) > 1 + 1e-6) || any(rowSums(exp(top - log_z)) > 1 + 1e-6))
+    return(fail("probabilities larger than 1: sum_exp must be the sum of exp(score) over all the entities (if you have its logarithm, name the column log_sum_exp)"))
+
+  # each test triple once per fold
+  key <- paste(fold, ent$head, ent$relation, ent$tail, sep = "\t")
+  if (anyDuplicated(key)) return(fail(sprintf("%d duplicated test triple(s) in the same fold", sum(duplicated(key)))))
+
+  # rank and top_scores should agree: top_scores[rank] = score_true when rank <= BYOD_N_TOP
+  tol   <- 1e-6 * pmax(1, abs(score))
+  agree <- ifelse(rank <= BYOD_N_TOP,
+                  abs(top[cbind(seq_along(rank), pmin(rank, BYOD_N_TOP))] - score) <= tol,
+                  score <= top[, BYOD_N_TOP] + tol)
+  if (mean(!agree) > 0.01)
+    res$warnings <- sprintf("for %.0f%% of the triples score_true is not at position rank of top_scores: rank and top_scores should be computed in the same setting (raw or filtered)", 100 * mean(!agree))
+
+  res$folds <- fmt_folds(fold)
+  res$data  <- tibble(model = info$model, fold = as.integer(fold), head = ent$head, relation = ent$relation,
+                      tail = ent$tail, rank = rank, score_true = score, log_z = log_z)
+  res$top   <- top
+  res
+}
+
+# Uploaded files -> data.frame(name, datapath); .zip archives are extracted (.parquet / .csv kept)
+byod_expand_uploads <- function(up) {
+  out <- lapply(seq_len(nrow(up)), function(i) {
+    if (tolower(tools::file_ext(up$name[i])) != "zip")
+      return(data.frame(name = up$name[i], datapath = up$datapath[i]))
+    dir <- tempfile("byod_zip_")
+    utils::unzip(up$datapath[i], exdir = dir)
+    fs  <- list.files(dir, recursive = TRUE, full.names = TRUE)
+    rel <- substring(fs, nchar(dir) + 1)
+    fs  <- fs[!grepl("(^|/)(__MACOSX|\\.)", rel) & tolower(tools::file_ext(fs)) %in% c("parquet", "csv")]
+    data.frame(name = basename(fs), datapath = fs)
+  })
+  do.call(rbind, out)
+}
+
+# Training triples (head, relation, tail separated by tabs, no header) -> distinct entities
+byod_read_train <- function(path) {
+  tr <- utils::read.delim(path, header = FALSE, quote = "", comment.char = "", colClasses = "character",
+                          na.strings = character(0), strip.white = TRUE, fileEncoding = "UTF-8-BOM")
+  if (ncol(tr) != 3) stop("expected 3 columns separated by tabs (head, relation, tail), found ", ncol(tr))
+  unique(c(tr[[1]], tr[[3]]))
+}
+
+# Checks across all the uploaded tables and, if everything is fine, computes the metrics.
+# Returns list(ok, msgs, results); msgs is a list of (status = "ok" / "warn" / "error", text).
+byod_check_all <- function(files, n_entities, train = NULL) {
+  msgs <- list()
+  add  <- function(status, text) msgs[[length(msgs) + 1]] <<- list(status = status, text = text)
+  done <- function() list(ok = !any(vapply(msgs, function(m) m$status == "error", logical(1))),
+                          msgs = msgs, results = NULL)
+
+  if (length(files) == 0) { add("error", "no .parquet or .csv file found in the upload"); return(done()) }
+  good <- Filter(function(f) length(f$errors) == 0, files)
+  if (length(good) < length(files))
+    add("error", sprintf("%d of %d file(s) cannot be used: see the table below", length(files) - length(good), length(files)))
+  if (length(good) == 0) return(done())
+  data <- bind_rows(lapply(good, `[[`, "data"))
+  top  <- do.call(rbind, lapply(good, `[[`, "top"))
+
+  # models and folds: each (model, fold) in one file only
+  pairs <- bind_rows(lapply(good, function(f) distinct(f$data, model, fold)))
+  dup   <- pairs %>% count(model, fold) %>% filter(n > 1)
+  if (nrow(dup))
+    add("error", paste("the same (model, fold) is in more than one file:", paste0(dup$model, " fold ", dup$fold, collapse = "; ")))
+  folds <- lapply(split(pairs$fold, pairs$model), function(f) sort(unique(f)))
+  add("ok", paste0(length(folds), " model(s): ", paste0(names(folds), " (", lengths(folds), " folds)", collapse = ", ")))
+  if (length(unique(folds)) > 1) add("warn", "the models do not have the same folds")
+  if (any(lengths(folds) < 2)) add("warn", "with a single fold the Cross-Fold Analysis and the per-triple intervals are not informative")
+
+  # the same test triples in every (model, fold)
+  key      <- paste(data$head, data$relation, data$tail, sep = "\t")
+  n_all    <- length(unique(key))
+  n_common <- length(unique(Reduce(intersect, split(key, paste(data$model, data$fold)))))
+  share    <- n_common / n_all
+  if (share == 1) {
+    add("ok", sprintf("the same %s test triples in every (model, fold)", fmt_int(n_all)))
+  } else if (share >= BYOD_MIN_OVERLAP) {
+    add("warn", sprintf("%s of the %s test triples (%.1f%%) are in every (model, fold): the others are kept, but their cross-fold statistics use fewer folds",
+                        fmt_int(n_common), fmt_int(n_all), 100 * share))
+  } else {
+    add("error", sprintf("only %s of the %s test triples (%.0f%%) are in every (model, fold): every fold of every model must be tested on the same test triples",
+                         fmt_int(n_common), fmt_int(n_all), 100 * share))
   }
   
-  if (position <= k) {
-    # true tail inside top-k: probability equals its softmax
-    return(-log(max(softmax_true, 1e-300))) 
+  # number of entities
+  test_entities <- unique(c(data$head, data$tail))
+  if (!is.null(train)) {
+    if (!is.null(train$error)) {
+      add("warn", paste("training file not used:", train$error))
+    } else {
+      unseen <- mean(!(test_entities %in% train$entities))
+      if (unseen > 0.05)
+        add("warn", sprintf("%.0f%% of the entities in the test triples are not in the training file: is it the right file (same entity names)?", 100 * unseen))
+    }
+  }
+  min_n <- max(length(test_entities), max(data$rank), BYOD_N_TOP + 1)
+  if (is.null(n_entities) || is.na(n_entities)) {
+    add("error", "enter the number of entities |E| (or upload the training file)")
+  } else if (n_entities != round(n_entities) || n_entities < min_n) {
+    add("error", sprintf("|E| = %s is not valid: it must be an integer, at least the largest rank and the number of entities in the test triples (%s)",
+                         format(n_entities), fmt_int(min_n)))
+  } else {
+    add("ok", sprintf("|E| = %s entities", fmt_int(n_entities)))
   } 
   
-  else {
-    # true tail outside top-k: probability is uniform residual mass divided by (n_entities - k)
-    # compute mass_topk from top100_cumexp if k <= 100
+  out <- done()
+  if (!out$ok) return(out)
     
-    if (k <= length(top100_cumexp)) {
-      mass_topk <- top100_cumexp[k] / sum_exp_all
-    } else {
-      
-      # k > length(top100_cumexp) (shouldn't happen since k <= 100 in UI), fall back to using top100 mass
-      mass_topk <- top100_cumexp[length(top100_cumexp)] / sum_exp_all
-      # remaining mass is (1 - mass_topk) spread over n_entities - k
-    }
-    
-    pi_k <- (1 - mass_topk) / (n_entities - k)
-    # numeric safety
-    pi_k <- max(pi_k, 1e-300)
-    return(-log(pi_k))
-  }
-} # this function is ok!
-
-# Helper to compute mean and 95% CI across folds
-summarize_across_folds <- function(df, value_col = fold) {
-  df %>%
-    group_by(value_col) %>% # here df is already per-fold per-triple aggregate; but we'll compute per-fold metrics first
-    summarise(.groups = "drop") # value col is the name of the folder columns
-}
-#dati <- read.table("train_YAGO3-10.txt", blank.lines.skip = FALSE, col.names = c("head", "relation", "tail"))
-
-# ---------- Data generator (datasets × 15 folds) ------------
-#dati <- read.table(file ="train_WN18RR.txt", col.names = c("head", "relation", "tail"), 
-#blank.lines.skip = FALSE)
-#dati <- dati[1:100, ]
-dataset_name = "YAGO3_10"
-model_name = "MurE"
-#dati = read_parquet(file = "combined_YAGO3_10_RotatE.parquet")
-read_dataset_with_folds <- function(dataset_name,
-                                    model_name) { # this is the function to read and preprocess correctly the dataset 
-  
-  # Returns a tibble with one row per (fold, triple) containing:
-  # head, relation, tail, fold, position, score (logit of true tail),
-  # softmax_true, top100_scores (numeric vector), top100_entities (char vector),
-  # top100_cumexp (numeric cumexp vector length 100), sum_exp_all, n_entities
-  ds <- as.character(dataset_name[1])
-  md <- as.character(model_name[1])
-  file_path <- paste0("combined_", ds, "_", md, ".parquet")
-  #file_path <- paste("combined_", paste(dataset_name, sep = "", "_"), model_name, ".parquet", sep = "") # define the path of the parquet file
-  train_path <- paste("train_", dataset_name, ".txt", sep = "") # training data --> i think it is not useful
-  dati <- read_parquet(file_path) # import the corresponding data
-  dati_train <- read.table(train_path, col.names = c("head", "relation", "tail"), 
-                           blank.lines.skip = FALSE) 
-  head <- as.character(dati$head) # head in test set
-  relations <- as.character(dati$relation) # relations in test set
-  tails <- as.character(dati$tail) # tails in test set
-  n_entities <- length(c(tails, head)) # total number of entities inside the test set
-  # it you want to use Chebyshev inequality, Recall fr(|X_{i} - \mu| > \sigma \epsilon) <= 1/\epsilon^2
-  # set 1/epsilon^2 = 0.05 and obtaint
-  eps <- sqrt(1/0.05)
-
-  k_range <- c(1, 3, 10, 20)
-  best_position <- matrix(NA, nrow = nrow(dati), ncol = 13) # here we work more at a tuple level 
-  best_position <- as.data.frame(best_position)
-  colnames(best_position) <- c("entity_position", "softmax_score", "fold", paste("k", k_range, sep = "_"), "mrr", "head", "relation", "tail", "top_100_scores", "top_100_entities")
-  best_position[, "fold"] <- dati$fold
-  best_position[, "head"] <- head
-  best_position[, "tail"] <- tails
-  best_position[, "relation"] <- relations
-  best_position$top_100_scores <- dati$top_100_scores
-  best_position$top_100_entities <- dati$top_100_entities
-  for (i in 1:nrow(best_position)) {
-    exp_score <- exp(dati$top_100_scores[i][[1]])/dati$sum_exp[i]
-    if (tails[i] %in% dati$top_100_entities[i][[1]]) {
-      best_position[i,1] <- dati$hits[i]
-      best_position[i, 8] <- 1/dati$hits[i]
-      #best_position[i,1] <- which(dati$top_100_entities[i][[1]] == tails[i])
-      best_position[i, 2] <- exp(dati$top_100_scores[[i]][best_position[i, 1]])/(dati$sum_exp[i])
-      best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
-        if (best_position[i,1] <= k) {
-          -log(best_position[i, 2])
-          
-        }
-        else{
-          mass_topk <- cumsum(exp_score[1:k])[k]
-          -log((1 - mass_topk) / (n_entities - k))
-          
-          
-        }
-        
-      })
-      
-      
-    }
-    if (is.na(best_position[i, 1]) ) {
-      best_position[i, 1] <- dati$hits[i]
-      best_position[i, 8] <- 1/dati$hits[i]
-      best_position[i, 4:7] <- sapply(k_range, FUN = function(k){
-        mass_topk <- cumsum(exp_score[1:k])[k]
-        -log((1 - mass_topk) / (n_entities - k))
-        
-        
-      })
-    }
-    
-  }
-  dati |> 
-    group_by(fold) |> 
-    summarise(
-      across(
-        c(`hits@1`, `hits@3`, `hits@10`, `hits@20`, mrr, orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20),
-        list(
-          mean = ~mean(.x, na.rm = TRUE),
-          # Chebyshev Lower Bound (capped at 0 minimum)
-          ci_low = ~mean(.x, na.rm = TRUE) - 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
-          # Chebyshev Upper Bound (capped at 1 maximum)
-          ci_high = ~mean(.x, na.rm = TRUE) + 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
-        ),
-        .names = "{.col}_{.fn}" 
-      )
-    ) -> results_matrix
-  
-  best_position |> 
-    group_by(fold) |> 
-    summarise(
-      across(
-        c("k_1", "k_3", "k_10", "k_20"),
-        list(
-          mean = ~mean(.x, na.rm = TRUE),
-          # Chebyshev Lower Bound (capped at 0 minimum)
-          ci_low = ~mean(.x, na.rm = TRUE) - 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x)))),
-          # Chebyshev Upper Bound (capped at 1 maximum)
-          ci_high = ~mean(.x, na.rm = TRUE) + 
-            eps * (sd(.x, na.rm = TRUE) / sqrt(sum(!is.na(.x))))
-        ),
-        .names = "{.col}_{.fn}" 
-      )
-    ) -> results_matrix_bis
-
-  results_matrix <- results_matrix %>%
-    left_join(results_matrix_bis, by = "fold")
-  dati |>
-    select(orig_brier_1, orig_brier_3, orig_brier_10, orig_brier_20) -> dat_appoggio
-  best_position <- cbind(best_position, dat_appoggio)
-
-  output <- list(results_matrix = results_matrix, best_position = best_position)
-  return(output)
+  # metrics
+  per_triple <- bind_cols(
+    data %>% transmute(entity_position = rank, fold, mrr = 1 / rank, head, relation, tail, model),
+    compute_topk_scores(data$rank, data$score_true, data$log_z, top, n_entities)
+  )
+  results_matrix <- bind_rows(lapply(split(per_triple, per_triple$model), function(d)
+    summarise_by_fold(d) %>% mutate(model = d$model[1])))
+  out$results <- list(results_matrix = results_matrix, best_position = per_triple)
+  out
 }
 
-
-# ---------- UI ------------
 # ---------- UI ------------
 ui <- fluidPage(
   theme = bs_theme(
@@ -299,6 +455,9 @@ ui <- fluidPage(
       .title-panel { background: linear-gradient(90deg,#1F4E79,#2E86C1); color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
       .card { border-radius: 10px; box-shadow: 0px 2px 10px rgba(0,0,0,0.05); margin-bottom: 20px; }
       .control-label { font-weight: 600; }
+      /* uiOutput() as a block: with display: contents (Shiny >= 1.8.1) recent Shiny versions
+         may treat it as hidden and stop updating it after a tab change */
+      .shiny-html-output { display: block; }
     "))
   ),
   
@@ -311,11 +470,11 @@ ui <- fluidPage(
     sidebarPanel(
       width = 3,
       h4("Configuration"),
-      selectInput("dataset", "Dataset", choices = c("YAGO3_10", "WN18RR", "KINSHIPS", "FB15k237")),
+      selectInput("dataset", "Dataset", choices = c(BUILTIN_DATASETS, USER_DATASET)),
       pickerInput(
         inputId = "model", 
         label = "Select Models to Compare", 
-        choices = c("RotatE", "HolE", "MurE", "ComplEx"), 
+        choices = BUILTIN_MODELS,
         selected = "MurE", 
         options = list(`actions-box` = TRUE), 
         multiple = TRUE
@@ -325,7 +484,7 @@ ui <- fluidPage(
       
       hr(),
       h5("Inspector Settings"),
-      selectInput("model_single", "Model for Detailed Analysis", choices = c("RotatE", "HolE", "MurE", "ComplEx"), selected = "MurE"),
+      selectInput("model_single", "Model for Detailed Analysis", choices = BUILTIN_MODELS, selected = "MurE"),
       selectInput("triple_filter", "Filter Triples By Behavior", 
                   choices = c("Medium (Rank near 50)", "Random (Mixed)", "Easy (Consistently High Rank)", "Hard (Consistently Low Rank)", "High Variance")),
       sliderInput("n_sample_triples", "Triples to inspect", min = 5, max = 80, value = 20),
@@ -401,6 +560,84 @@ ui <- fluidPage(
                      )
                    ))
                  )
+        ),
+
+        # ---------- Tab 4: Bring Your Own Data ----------
+        tabPanel("Bring Your Own Data",
+                 br(),
+                 fluidRow(
+                   column(5, card(
+                     card_header("1. The setting"),
+                     card_body(
+                       p("Evaluate your own models with the metrics of this demo. The setting is the one of our experiments:"),
+                       tags$ul(
+                         tags$li(tags$b("one dataset", .noWS = "after"), ": a knowledge graph with a set of entities ", tags$i("E"),
+                                 " and a fixed set of ", tags$b("test triples"), " (h, r, t);"),
+                         tags$li(tags$b("one or more models", .noWS = "after"), ", e.g. RotatE and ComplEx;"),
+                         tags$li("for each model, ", tags$b("several training runs", .noWS = "after"), ", the ", tags$b("folds"),
+                                 " (15 in our experiments).")
+                       ),
+                       p(tags$b("Every fold of every model must be tested on the same test triples."),
+                         " This is what allows us to follow each triple across the folds (Cross-Fold Analysis,",
+                         " Triple Inspector) and to compare the models on the same ground."),
+                       p("For each test triple the model answers the query (h, r, ?) by scoring all the candidate",
+                         " tails in ", tags$i("E", .noWS = "after"), ": the softmax of these scores is its predictive distribution.",
+                         " You provide the rank of the true tail and a few summaries of the scores; Hits@k, MRR",
+                         " and the Top-k Log and Brier scores are computed here.")
+                     )
+                   )),
+                   column(7, card(
+                     card_header("2. File format"),
+                     card_body(
+                       p(tags$b("One table per (model, fold)", .noWS = "after"), ", in Parquet or CSV, named ", tags$code("<model>_fold<f>", .noWS = "after"),
+                         ": e.g. ", tags$code("RotatE_fold1.csv", .noWS = "after"), ", \u2026, ", tags$code("RotatE_fold15.csv", .noWS = "after"), ", ",
+                         tags$code("ComplEx_fold1.csv", .noWS = "after"), ", \u2026 The model names shown in the app are taken from the file names.",
+                         " One row per test triple, with these columns:"),
+                       byod_spec_table(),
+                       tags$ul(
+                         class = "small text-muted",
+                         tags$li("Columns are matched by name, in any order; other columns are ignored."),
+                         tags$li("Higher score = more plausible (if your model outputs distances, use score = \u2212distance). ",
+                                 tags$code("rank"), " and ", tags$code("top_scores"),
+                                 " must be computed in the same setting (raw or filtered)."),
+                         tags$li("Parquet: ", tags$code("top_scores"), " is a list column. CSV: one string per row, values separated by ';', e.g. ",
+                                 tags$code("-17.7;-18.2;-18.9;\u2026")),
+                         tags$li("Alternative layout: one table per model, ", tags$code("<model>.parquet"), " or ",
+                                 tags$code("<model>.csv", .noWS = "after"), ", with an extra integer column ", tags$code("fold", .noWS = "after"), ".")
+                       )
+                     )
+                   ))
+                 ),
+                 fluidRow(
+                   column(4, card(
+                     card_header("3. Upload"),
+                     card_body(
+                       fileInput("byod_files", "Model outputs: select all the files at once, or one .zip",
+                                 multiple = TRUE, accept = c(".parquet", ".csv", ".zip")),
+                       fileInput("byod_train", "Training triples (optional)", accept = c(".txt", ".tsv", ".csv")),
+                       numericInput("byod_n_entities", "Number of entities |E|", value = NA, min = 1, step = 1),
+                       helpText(paste("Filled in from the training file (head, relation, tail separated by tabs, no header)",
+                                      "as the number of distinct entities in train \u222A test, or typed by you.",
+                                      "The Top-k scores spread the probability mass outside the top-k list",
+                                      "over the other |E| \u2212 k entities.")),
+                       if (file.exists(BYOD_EXAMPLE)) tagList(
+                         hr(),
+                         downloadButton("byod_example", "Download example files"),
+                         helpText("YAGO3-10, 2 models \u00D7 5 folds, CSV. For this example use |E| = 123,182.")
+                       )
+                     )
+                   )),
+                   column(8,
+                          card(
+                            card_header("4. Checks"),
+                            card_body(uiOutput("byod_status"), DTOutput("byod_files_table", fill = FALSE))
+                          ),
+                          card(
+                            card_header("Your results at a glance"),
+                            card_body(DTOutput("byod_summary", fill = FALSE))
+                          )
+                   )
+                 )
         )
       )
     )
@@ -412,43 +649,201 @@ server <- function(input, output, session) {
   # Title for Log-K plot
   output$logk_title <- renderText({ paste0("Mean Top-", input$k, " Log Score Comparison") })
   
-  # Reactive Data Loading
+  # ===== Bring Your Own Data ==================================================
+
+  # 1. read and check every uploaded table (once per upload)
+  byod_files <- reactive({
+    req(input$byod_files)
+    files <- tryCatch(byod_expand_uploads(input$byod_files), error = function(e) e)
+    if (inherits(files, "error"))
+      return(list(byod_file_error(paste(input$byod_files$name, collapse = ", "),
+                                  paste("cannot extract the files:", conditionMessage(files)))))
+    lapply(seq_len(NROW(files)), function(i)
+      tryCatch(byod_read_file(files$datapath[i], files$name[i]),
+               error = function(e) byod_file_error(files$name[i], paste("unexpected error:", conditionMessage(e)))))
+  })
+
+  # 2. optional training file -> entities -> |E| = distinct entities in train U test
+  byod_train <- reactive({
+    req(input$byod_train)
+    tryCatch(list(entities = byod_read_train(input$byod_train$datapath), error = NULL),
+             error = function(e) list(entities = NULL, error = conditionMessage(e)))
+  })
+  observe({
+    tr <- byod_train()
+    req(tr$entities)
+    fl <- if (is.null(input$byod_files)) list() else byod_files()
+    test_entities <- unlist(lapply(fl, function(f) c(f$data$head, f$data$tail)))
+    updateNumericInput(session, "byod_n_entities", value = length(union(tr$entities, test_entities)))
+  })
+  byod_n <- debounce(reactive(input$byod_n_entities), 700)
+
+  # 3. checks across the tables + metrics
+  byod_checked <- reactive({
+    req(input$byod_files)
+    byod_check_all(byod_files(), byod_n(), train = if (is.null(input$byod_train)) NULL else byod_train())
+  })
+
+  # data used by the other tabs when "Your data" is selected (NULL until all the checks pass)
+  byod_data <- reactive({
+    if (is.null(input$byod_files)) return(NULL)
+    ck <- byod_checked()
+    if (ck$ok) ck$results else NULL
+  })
+  byod_models <- reactiveVal(character(0))   # changes only when the model names change
+  observe({
+    d <- byod_data()
+    byod_models(if (is.null(d)) character(0) else unique(d$best_position$model))
+  })
+
+  # after a new upload, select "Your data" as soon as the data pass the checks
+  byod_pending_switch <- reactiveVal(FALSE)
+  observeEvent(input$byod_files, byod_pending_switch(TRUE))
+  observe({
+    req(byod_pending_switch(), !is.null(byod_data()))
+    byod_pending_switch(FALSE)
+    updateSelectInput(session, "dataset", selected = USER_DATASET)
+    showNotification(paste0("Your data are loaded: '", USER_DATASET, "' is now selected in the Dataset menu."),
+                     type = "message", duration = 6)
+  })
+
+  output$byod_status <- renderUI({
+    if (is.null(input$byod_files)) return(p(class = "text-muted", "Upload your files to run the checks."))
+    ck <- byod_checked()
+    tagList(
+      tags$ul(class = "list-unstyled mb-2", lapply(ck$msgs, function(m) {
+        st <- BYOD_STATUS[[m$status]]
+        tags$li(style = paste0("color:", st[2], ";"), paste(st[1], m$text))
+      })),
+      if (ck$ok) {
+        div(class = "alert alert-success py-2", "Ready: your models are now available as ",
+            tags$b(USER_DATASET, .noWS = "after"), " in the Dataset menu on the left.")
+      } else {
+        div(class = "alert alert-danger py-2", "Fix the errors and upload the files again.")
+      }
+    )
+  })
+
+  output$byod_files_table <- renderDT({
+    req(input$byod_files)
+    fl <- byod_files()
+    req(length(fl) > 0)
+    tab <- data.frame(
+      File    = vapply(fl, `[[`, "", "file"),
+      Model   = vapply(fl, `[[`, "", "model"),
+      Folds   = vapply(fl, `[[`, "", "folds"),
+      Triples = vapply(fl, function(f) if (is.null(f$data)) NA_integer_ else nrow(f$data), 1L),
+      Status  = vapply(fl, function(f) if (length(f$errors)) "error" else if (length(f$warnings)) "warning" else "ok", ""),
+      Notes   = vapply(fl, function(f) paste(c(f$errors, f$warnings, f$notes), collapse = "; "), "")
+    )
+    datatable(tab, rownames = FALSE,
+              options = list(pageLength = 5, lengthMenu = c(5, 15, 60), searching = FALSE, scrollX = TRUE)) %>%
+      formatStyle("Status", fontWeight = "bold",
+                  color = styleEqual(c("ok", "warning", "error"), c("#1E8449", "#B9770E", "#C0392B")))
+  })
+
+  output$byod_summary <- renderDT({
+    d <- byod_data()
+    validate(need(!is.null(d), "Available when all the checks are passed."))
+    k <- as.numeric(input$k)
+    tab <- d$best_position %>%
+      group_by(Model = model) %>%
+      summarise(
+        Folds   = n_distinct(fold),
+        Triples = n_distinct(head, relation, tail),
+        MRR     = mean(mrr),
+        Hits    = mean(entity_position <= k),
+        LogS    = mean(.data[[paste0("k_", k)]]),
+        Brier   = mean(.data[[paste0("orig_brier_", k)]]),
+        .groups = "drop"
+      ) %>%
+      mutate(across(c(MRR, Hits, LogS, Brier), ~round(.x, 3))) %>%
+      rename(!!paste0("Hits@", k) := Hits, !!paste0("Top-", k, " Log") := LogS, !!paste0("Top-", k, " Brier") := Brier)
+    datatable(tab, rownames = FALSE, options = list(dom = "t", ordering = FALSE),
+              caption = "Means over all the test triples and folds; k is set in the sidebar.")
+  })
+
+  output$byod_example <- downloadHandler(
+    filename = function() BYOD_EXAMPLE,
+    content  = function(file) file.copy(BYOD_EXAMPLE, file),
+    contentType = "application/zip"
+  )
+
+  # ===== Data of the selected dataset =========================================
+
+  # models offered in the sidebar: the built-in ones, or the ones read from the uploaded files
+  observeEvent(list(input$dataset, byod_models()), {
+    user   <- identical(input$dataset, USER_DATASET)
+    models <- if (user) byod_models() else BUILTIN_MODELS
+    sel    <- intersect(input$model, models)
+    if (length(sel) == 0) sel <- if (user) models else "MurE"
+    sel_single <- if (isTRUE(input$model_single %in% models)) input$model_single else if (user) head(models, 1) else "MurE"
+    freezeReactiveValue(input, "model")
+    freezeReactiveValue(input, "model_single")
+    updatePickerInput(session, "model", choices = models, selected = sel)
+    updateSelectInput(session, "model_single", choices = models, selected = sel_single)
+  }, ignoreInit = TRUE, priority = 10)
+
+  # results of one model: list(results_matrix, best_position), NULL if not available
+  model_data <- function(dataset, m) {
+    if (identical(dataset, USER_DATASET)) {
+      d <- byod_data()
+      if (is.null(d) || !(m %in% d$best_position$model)) return(NULL)
+      return(list(results_matrix = filter(d$results_matrix, model == m),
+                  best_position  = filter(d$best_position, model == m)))
+    }
+    res <- tryCatch(load_builtin(dataset, m), error = function(e) NULL)
+    if (is.null(res)) return(NULL)
+    res$results_matrix$model <- m
+    res$best_position$model  <- m
+    res
+  }
+  need_user_data <- function() {
+    if (identical(input$dataset, USER_DATASET))
+      validate(need(!is.null(byod_data()),
+                    if (is.null(input$byod_files)) "No data loaded yet: upload your files in the 'Bring Your Own Data' tab."
+                    else "Your files did not pass the checks: see the 'Bring Your Own Data' tab."))
+  }
+
+  # Reactive Data Loading (models to compare)
   processed_data <- reactive({
-    req(input$dataset, input$model)
-    all_models_list <- map(input$model, function(m) {
-      tryCatch({
-        res <- read_dataset_with_folds(input$dataset, m)
-        res$results_matrix$model <- m
-        res$best_position$model <- m
-        return(res)
-      }, error = function(e) { return(NULL) })
-    })
-    all_models_list <- compact(all_models_list)
-    if(length(all_models_list) == 0) return(NULL)
-    
+    req(input$dataset)
+    need_user_data()
+    req(input$model)
+    all_models_list <- compact(map(input$model, ~ model_data(input$dataset, .x)))
+    validate(need(length(all_models_list) > 0, paste0("No results available for ", input$dataset, ".")))
     list(
       results_matrix = bind_rows(map(all_models_list, "results_matrix")),
       best_position = bind_rows(map(all_models_list, "best_position"))
     )
   })
   
-  res_matrix <- reactive({ req(processed_data()$results_matrix) })
-  best_pos   <- reactive({ req(processed_data()); processed_data()$best_position })
+  res_matrix <- reactive({ processed_data()$results_matrix })
   
-  
-  res_matrix_single <- reactive({
-    req(res_matrix(), input$model_single)
-    res_matrix() %>% filter(model == input$model_single)
+  # model for the detailed analysis (independent of the models to compare)
+  single_data <- reactive({
+    req(input$dataset)
+    need_user_data()
+    req(input$model_single)
+    d <- model_data(input$dataset, input$model_single)
+    validate(need(!is.null(d), paste0("No results available for ", input$model_single, " on ", input$dataset, ".")))
+    d
   })
-  best_pos_single <- reactive({
-    req(best_pos(), input$model_single)
-    best_pos() %>% filter(model == input$model_single)
-  })
+  res_matrix_single <- reactive({ single_data()$results_matrix })
+  best_pos_single   <- reactive({ single_data()$best_position })
   
   bp_sampled_reactive <- reactive({
     req(best_pos_single(), sampled_triples())
     best_pos_single() %>%
       semi_join(sampled_triples(), by = c("head", "relation", "tail"))
+  })
+
+  # folds of the reference-fold menu: the ones in the data
+  observe({
+    folds <- as.character(sort(unique(best_pos_single()$fold)))
+    req(length(folds) > 0)
+    sel <- shiny::isolate(input$ref_fold)   # shiny:: because library(renv) masks isolate()
+    updateSelectInput(session, "ref_fold", choices = folds, selected = if (isTRUE(sel %in% folds)) sel else folds[1])
   })
   
   
@@ -541,7 +936,8 @@ server <- function(input, output, session) {
       theme(legend.position = "bottom")
   })
   # --- Resampling Filtered Triples ---
-  sampled_triples <- eventReactive(input$resample, {
+  # new sample when "Fetch Triples" is pressed or the data of the inspected model change
+  sampled_triples <- eventReactive(list(input$resample, best_pos_single()), {
     req(best_pos_single())
     set.seed(input$seed)
     
@@ -559,13 +955,13 @@ server <- function(input, output, session) {
       valid_triples <- triple_stats %>% filter(mean_rank <= 5)
     } else if (input$triple_filter == "Hard (Consistently Low Rank)") {
       valid_triples <- triple_stats %>% filter(mean_rank >= 70)
-    } else if (input$triple_filter == "High Variance (Model Uncertain)") {
+    } else if (input$triple_filter == "High Variance") {
       valid_triples <- triple_stats %>% arrange(desc(sd_rank)) %>% head(150)
-    } else if (input$triple_filter == "Random (Mixed)") {
-      valid_triples <- triple_stats 
-    }  else if (input$triple_filter == "Medium (Rank near 50)") {
+    } else if (input$triple_filter == "Medium (Rank near 50)") {
       # Safest approach: grab top 150 closest to rank 50, then sample from them
       valid_triples <- triple_stats %>% arrange(abs(mean_rank - 50)) %>% head(150)
+    } else {  # "Random (Mixed)"
+      valid_triples <- triple_stats
     }
     # Sample the requested number (or the max available if fewer match the filter)
     n <- min(nrow(valid_triples), input$n_sample_triples)
@@ -727,24 +1123,8 @@ server <- function(input, output, session) {
       )
   })
   
-  # --- Top 100 predictions ---
-  output$top100_table <- renderDT({
-    req(input$selected_triple_idx, best_pos_single(), input$fold_for_top100)
-    sel_idx <- as.integer(strsplit(input$selected_triple_idx, ":")[[1]][1])
-    chosen <- sampled_triples()[sel_idx, ]
-    fold_sel <- as.integer(input$fold_for_top100)
-    
-    row <- best_pos_single() %>% filter(head == chosen$head, relation == chosen$relation, tail == chosen$tail, fold == fold_sel)
-    if (nrow(row) == 0) return(datatable(tibble(note = "No data"), options = list(dom = 't')))
-    
-    ents <- unlist(row$top_100_entities[[1]])
-    scs  <- unlist(row$top_100_scores[[1]])
-    tbl <- tibble(pos = seq_along(ents), entity = ents, score = round(scs, 4))
-    datatable(tbl, options = list(pageLength = 5, scrollX = TRUE))
-  })
-  
   output$download_combined_csv <- downloadHandler(
-    filename = function() paste0("metrics_", input$dataset, "_", input$model, "_", Sys.Date(), ".csv"),
+    filename = function() paste0("metrics_", gsub("[^A-Za-z0-9]+", "_", input$dataset), "_", input$model_single, "_", Sys.Date(), ".csv"),
     content = function(file) { write.csv(res_matrix_single(), file, row.names = FALSE) }
   )
   
